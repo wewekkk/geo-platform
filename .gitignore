@@ -1,0 +1,17 @@
+# 環境變數（API 金鑰，絕對不可進版控）
+.env
+
+# 資料目錄：原始回答 gzip 檔與 SQLite 資料庫
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# 編輯器 / 作業系統
+.DS_Store
+.vscode/
+.idea/
