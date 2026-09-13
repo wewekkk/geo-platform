@@ -71,7 +71,7 @@ N=10 · condition=api · locale=tw · 上次跑批 2026-08-24 03:12
 
 ---
 
-## 資料模型（十張表）
+## 資料模型（十張表 ＋ 階段 6 的第十一張）
 
 | 表 | 用途 | 誰維護 |
 |---|---|---|
@@ -85,6 +85,7 @@ N=10 · condition=api · locale=tw · 上次跑批 2026-08-24 03:12
 | `gaps` | 內容缺口＋機會分數 | 系統提議，人決定 |
 | `actions` | 採取過的行動 | 人 |
 | `drafts` | 文章草稿 | 系統產生，人審 |
+| `page_audits` | 自家頁面的 AI 可讀性檢查結果（**階段 6 才建**） | 自動 |
 
 ### 欄位
 
@@ -105,6 +106,8 @@ gaps                id, title, topic, opportunity_score, status, opened_at,
                     closed_at, affected_prompt_ids, why
 actions             id, gap_id, channel, title, url, published_at, notes
 drafts              id, gap_id, title, outline, body, status, action_id, created_at
+page_audits         id, url, checked_at, check_key, passed, detail, severity
+                    （階段 6 才建。一個頁面一次檢查會有多列，一列一個檢查項目）
 ```
 
 ### 固定值
@@ -131,7 +134,7 @@ data/raw/{年}/W{週}/{引擎}/{prompt_id}_{locale}_{sample_index}.json.gz
 
 ---
 
-## 七支腳本的職責
+## 八支腳本的職責
 
 | 腳本 | 頻率 | 吃 → 做 → 吐 |
 |---|---|---|
@@ -141,7 +144,8 @@ data/raw/{年}/W{週}/{引擎}/{prompt_id}_{locale}_{sample_index}.json.gz
 | `gaps.py` | 每週 | 指標 → 找缺席題目群、算機會分數 → `gaps` |
 | `suggest.py` | 每週 | GSC 查詢字＋站內搜尋＋回答裡的新概念 → `prompt_suggestions` |
 | `draft.py` | 手動 | 一個 gap ＋ 它的證據 → 文章草稿 → `drafts` |
-| `app.py` | 隨時 | 全部的表 → Streamlit 七頁畫面 |
+| `audit.py` | 手動 | 自家網址清單 → 抓頁面做規則檢查 → `page_audits`（階段 6） |
+| `app.py` | 隨時 | 全部的表 → Streamlit 八頁畫面 |
 
 ### 機會分數公式
 
@@ -163,9 +167,13 @@ opportunity_score = (受影響題數 × 意圖權重 × 缺席程度) ÷ 補齊�
 
 **永遠不自動發佈。** 產出 `status=draft`，等人審核。
 
+**上面這四條規則要寫成可重複呼叫的檢查函式，不要只寫死在產生流程裡。**
+同一組規則有兩個用途：產生新草稿時當寫作準則，以及 `audit.py` 拿去掃已經上線的頁面。
+寫成一份、兩邊共用，不要各寫一次 —— 兩份規則遲早會不一致。
+
 ---
 
-## Dashboard 七頁
+## Dashboard 八頁
 
 | 頁 | 內容 |
 |---|---|
@@ -175,6 +183,7 @@ opportunity_score = (受影響題數 × 意圖權重 × 缺席程度) ÷ 補齊�
 | **競品比較** | 各競品的 SoV、排名、被引用來源 |
 | **來源分析** | Citation 次數、來源影響力排名、來源清單（含「機會等級」欄：引用競品但沒引用我們 = 高機會）、來源類型分布 |
 | **機會建議** | 依機會分數排序的缺口表、選定缺口的詳情（原因／四張渠道行動卡：官網內容·社群·PR媒體·UGC／預期成效）、產生草稿的按鈕 |
+| **網站健檢** | 自家頁面的 AI 可讀性檢查結果、每頁的問題清單與修法、與「哪些缺口對應到哪些頁面」的對照（階段 6 才做） |
 | **設定** | 題庫管理（**支援 CSV 上傳匯入，也可直接在畫面上新增／編輯／停用題目**）、題目建議佇列（加入／忽略）、競品名單、採樣設定 |
 
 ---
@@ -217,6 +226,9 @@ opportunity_score = (受影響題數 × 意圖權重 × 缺席程度) ÷ 補齊�
 ### 階段 0 — 骨架
 
 十張表建好、七支腳本有可執行的空殼、七頁畫面排好版、一支塞假資料的 seed 腳本。
+
+（這裡的七支／七頁是階段 0 當時的範圍，已完成。`audit.py`、`page_audits` 表和第八頁
+「網站健檢」是 2026-09-01 才追加進設計的，屬於階段 6，不在階段 0 的驗收範圍內。）
 
 **驗收條件：**
 
@@ -265,10 +277,45 @@ opportunity_score = (受影響題數 × 意圖權重 × 缺席程度) ÷ 補齊�
 
 `suggest.py`（接 Google Search Console）＋ `draft.py`。
 
+### 階段 6 — 網站健檢（AI 可讀性）
+
+`audit.py` ＋ Dashboard 第八頁。
+
+**這一階段補的是整個設計唯一的盲點。** 前五階段都在回答「AI 有沒有提到我們」，
+但如果 `fluv.com` 一直沒被引用，沒有任何一頁告訴你**為什麼**。
+可能不是內容不夠，而是結構讓模型讀不到 —— 沒有 schema、答案埋在第五段、
+`robots.txt` 直接擋掉 AI 爬蟲。
+
+檢查項目（全部是抓自己的頁面做規則比對，**不呼叫任何 AI API、不花錢**）：
+
+- `robots.txt` 有沒有擋掉 AI 爬蟲（GPTBot、ClaudeBot、PerplexityBot、Google-Extended）
+- 有沒有 `llms.txt`
+- schema.org 標記：`FAQPage` / `Article` / `Organization` 有沒有、對不對
+- 標題結構：一頁一個 `h1`，`h2` 是不是一個明確問題
+- 答案位置：答案在不在段落開頭（用 `draft.py` 抽出來的那組共用規則）
+- 事實密度：有沒有具體數字，形容詞比例會不會太高
+
+**依賴關係：** 只需要階段 4 做完（要先有缺口清單，才知道該檢查哪些頁面）。
+和階段 5 沒有先後關係，階段 5 如果卡住可以先做這個。
+
+**驗收：** 對至少一個已知沒被引用的自家頁面，系統能指出具體是哪一項不合格，
+而且照著改完之後可以重跑驗證。
+
 ### 之後（等公司內部資料可用）
 
 事實錯誤偵測（需要先建品牌權威事實表）· GA4 與預約資料歸因 · AI 爬蟲日誌分析 ·
 Slack 週報 · 對照組效果比較
+
+### 刻意不做的（看到同類工具有、但我們不加）
+
+2026-09-01 比對過市面上的 GEO SaaS（Geoptie 等）之後決定：
+
+- **不加 Copilot / Grok 引擎** —— 台灣寵物保姆的客群不會用這些找保姆。
+  加引擎會讓每週 API 成本線性上升，換到的是幾乎沒人看的數字。
+  引擎範圍就是 OpenAI／Anthropic／Perplexity／Google AI Overviews／Gemini，不再擴充。
+- **不做關鍵字自我競食（cannibalization）檢查** —— 那是 Google 排名的問題，不是被引用的問題。
+- **不建預存的大型 prompt 資料庫** —— 那類產品回答的是「AI 曾經對某個陌生人說過什麼」，
+  我們要的是「AI 現在對我們的題目說什麼，問 N 次，附信賴區間」。是兩個不同的問題。
 
 ---
 
