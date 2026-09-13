@@ -1,0 +1,20 @@
+# Fluv 品牌配色（對齊後台 fluv-prod 的設計語言）
+# 色碼來源：從後台頁面實際取樣 —— logo 薄荷藍 #80c0d0、珊瑚 #ff8084、
+# 文字 #313131 / #898989、卡片 #ffffff 疊在 #f8f8f9 底、Work Sans 14px。
+#
+# ⚠️ 圖表用色不在這裡，在 app.py 的 C_* 常數。那組經過色盲與對比驗證，
+#    不要直接把 logo 原色搬過去 —— #80c0d0 彩度只有 0.069，畫在圖上會像灰色。
+
+[theme]
+base = "light"
+primaryColor = "#0B8CA8"              # 品牌薄荷藍加深版（對白底 3.94:1）
+backgroundColor = "#ffffff"           # 卡片／主內容
+secondaryBackgroundColor = "#f8f8f9"  # 側邊欄與次要區塊（同後台）
+textColor = "#313131"                 # 同後台主文字
+font = "sans serif"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false

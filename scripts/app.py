@@ -49,39 +49,125 @@ from aggregate import wilson_interval  # noqa: E402
 
 st.set_page_config(page_title="Fluv GEO 監測平台", page_icon="🐾", layout="wide")
 
-# 配色：我們用藍色，競品用灰階，負面用紅、正面用綠
-C_US = "#2563eb"
-C_BAND = "rgba(37, 99, 235, 0.16)"
-C_POS = "#16a34a"
-C_NEU = "#94a3b8"
-C_NEG = "#dc2626"
-C_ACTION = "#f59e0b"
+# ═══ 配色 ═══════════════════════════════════════════════════════════════
+# 對齊 Fluv 後台的設計語言（logo 薄荷藍 + 珊瑚粉），但色碼不是直接照搬 ——
+# logo 原色 #80c0d0 彩度只有 0.069，畫在圖表上會被當成灰色，所以加深過。
+#
+# 這組全部跑過可計算的檢查（OKLab ΔE 色盲模擬、亮度帶、彩度下限、WCAG 對比）：
+#   類別色 4 色  #0B8CA8 #C08416 #6A4FA3 #E8595E  色盲 ΔE 17.9（門檻 8）
+#   發散色階     正 #3E7D1E ← 中性灰 #9AA5AD → 負 #DC5257  色盲 ΔE 12.1
+#   單色階       #9fbcc6 → #037586  單一色相、相鄰 ΔL >= 0.06、最淺端 2.0:1
+# 要改色請重跑驗證，不要憑眼睛判斷。
+
+C_US = "#0B8CA8"                       # 我們（品牌薄荷藍加深版）對白底 3.94:1
+C_OTHER = "#B9C3C9"                    # 競品／其他（中性灰）
+C_BAND = "rgba(11, 140, 168, 0.15)"    # 信賴區間陰影
+C_POS = "#3E7D1E"                      # 正面 5.05:1
+C_NEU = "#9AA5AD"                      # 中性（發散色階的中點，本來就該是灰的）
+C_NEG = "#DC5257"                      # 負面 3.90:1
+C_ACTION = "#C08416"                   # 行動標記線 3.20:1
+C_ALERT = "#E8595E"                    # 高機會來源／風險
+C_INK = "#313131"                      # 主文字（同後台）
+C_MUTED = "#898989"                    # 次要文字（同後台）
+
+# 類別色：固定順序，不可循環使用。第 5 類以後請歸入「其他」，不要自動生新色。
+C_CAT = ["#0B8CA8", "#C08416", "#6A4FA3", "#E8595E"]
+# 單色階：熱區圖用（由淺到深，單一色相）
+C_SCALE = ["#9fbcc6", "#74abc3", "#5498b6", "#3785a4", "#037586"]
 
 st.markdown("""
 <style>
   /* 右上角固定的「示範資料」標記，七頁都看得到 */
   .demo-badge {
       position: fixed; top: 3.2rem; right: 1.2rem; z-index: 1000;
-      background: #fef3c7; color: #92400e; border: 1px solid #fcd34d;
+      background: #fff6e5; color: #8a5d00; border: 1px solid #ffd88a;
       border-radius: 999px; padding: 2px 12px; font-size: 12px; font-weight: 600;
   }
   /* 量測條件列 */
   .cond-bar {
-      background: #f1f5f9; border-left: 4px solid #2563eb; border-radius: 4px;
+      background: #f8f8f9; border-left: 4px solid #0B8CA8; border-radius: 5px;
       padding: 8px 14px; margin-bottom: 14px; font-size: 13px;
-      font-family: ui-monospace, "SF Mono", Menlo, monospace; color: #334155;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace; color: #313131;
   }
   .card {
-      border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 14px;
+      border: 1px solid #ececee; border-radius: 5px; padding: 12px 14px;
       height: 100%; background: #ffffff;
+      box-shadow: rgba(68, 102, 242, 0.05) 1px 5px 24px 0px;
   }
   .card h4 { margin: 0 0 6px 0; font-size: 14px; }
-  .card p  { margin: 0; font-size: 13px; color: #475569; }
-  mark.hit { background: #fde68a; padding: 1px 2px; border-radius: 2px; }
+  .card p  { margin: 0; font-size: 13px; color: #898989; }
+  mark.hit { background: #ffe9b0; padding: 1px 2px; border-radius: 2px; }
   .answer-box {
-      background: #ffffff; border: 1px solid #e2e8f0; border-radius: 6px;
+      background: #ffffff; border: 1px solid #ececee; border-radius: 5px;
       padding: 12px 14px; font-size: 14px; line-height: 1.9;
       max-height: 460px; overflow-y: auto; white-space: pre-wrap;
+  }
+
+  /* ───── 側邊欄導覽：做成後台那種「圖示＋文字」的清單 ─────
+     Streamlit 的 st.radio 預設會畫圓圈點選鈕，後台沒有那個東西。
+     把圓圈藏起來，選中的用珊瑚色文字表示（同後台 #ff8084）。 */
+  section[data-testid="stSidebar"] div[role="radiogroup"] {
+      gap: 0 !important;
+  }
+  section[data-testid="stSidebar"] div[role="radiogroup"] > label {
+      padding: 11px 10px !important;
+      margin: 0 !important;
+      border-radius: 5px;
+      cursor: pointer;
+      transition: background .12s ease;
+  }
+  /* 圓圈本體 */
+  section[data-testid="stSidebar"] div[role="radiogroup"] > label > div:first-child {
+      display: none !important;
+  }
+  section[data-testid="stSidebar"] div[role="radiogroup"] > label p {
+      font-size: 14px !important;
+      font-weight: 600 !important;
+      color: #313131 !important;
+      margin: 0 !important;
+  }
+  section[data-testid="stSidebar"] div[role="radiogroup"] > label:hover {
+      background: #f2f2f3;
+  }
+  /* 選中：珊瑚色文字 ＋ 左側色條（同後台） */
+  section[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked) {
+      background: #fff4f4;
+      box-shadow: inset 3px 0 0 0 #ff8084;
+  }
+  section[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked) p {
+      color: #ff8084 !important;
+  }
+
+  /* ───── 頁首：標題＋副標在左，麵包屑在右（同後台） ───── */
+  .page-head {
+      display: flex; align-items: baseline; justify-content: space-between;
+      flex-wrap: wrap; gap: 8px; margin: 0 0 18px 0;
+  }
+  .page-head .ph-title { font-size: 26px; font-weight: 700; color: #313131; line-height: 1.3; }
+  .page-head .ph-sub   { font-size: 13px; color: #898989; margin-top: 2px; }
+  .page-head .ph-crumb { font-size: 13px; color: #898989; }
+  .page-head .ph-crumb b { color: #313131; font-weight: 600; }
+
+  /* ───── KPI 色塊：後台那種飽和色塊 ───── */
+  .kpi {
+      display: flex; align-items: center; gap: 14px;
+      border-radius: 5px; padding: 18px 16px; min-height: 104px;
+      box-shadow: rgba(68, 102, 242, 0.05) 1px 5px 24px 0px;
+  }
+  .kpi-ico {
+      flex: 0 0 auto; width: 46px; height: 46px; border-radius: 50%;
+      background: rgba(255,255,255,.28); display: flex;
+      align-items: center; justify-content: center; font-size: 21px;
+  }
+  .kpi-label { font-size: 13px; color: rgba(255,255,255,.92); font-weight: 600; }
+  .kpi-value { font-size: 26px; color: #ffffff; font-weight: 700; line-height: 1.25; }
+  /* ⚠️ delta 一律用半透明白底，顏色不帶方向意義 ——
+     方向由「持平／上升／下降」這幾個字承載，不是顏色。
+     這樣才不會把隨機波動畫成紅色（見 CLAUDE.md 規則一）。 */
+  .kpi-delta {
+      display: inline-block; margin-top: 4px; padding: 1px 8px;
+      background: rgba(255,255,255,.25); border-radius: 999px;
+      font-size: 12px; color: #ffffff; font-weight: 600;
   }
 </style>
 """, unsafe_allow_html=True)
@@ -144,18 +230,37 @@ def compare_proportions(succ_now, n_now, succ_prev, n_prev):
     return ("上升" if diff > 0 else "下降", diff, why)
 
 
-def kpi(col, label, value_text, direction, diff_text, help_text=None):
-    """畫一個 KPI 方塊。
+# KPI 色塊的底色，取自後台儀表板（純裝飾用，不帶好壞的意思）
+KPI_TINT = {"teal": "#13c9ca", "amber": "#ffbc58",
+            "coral": "#ff8084", "blue": "#00a8ff", "gray": "#a5a5a5"}
+_ARROW = {"持平": "→", "上升": "↑", "下降": "↓", "增加": "↑", "減少": "↓"}
 
-    ⚠️ 「持平」一定要用 delta_color="off"（灰色），
-      不可以讓 Streamlit 自己把負數畫成紅色。
+
+def kpi(col, label, value_text, direction, diff_text,
+        help_text=None, tint="teal", icon="📊"):
+    """畫一個 KPI 色塊（版面照後台儀表板）。
+
+    ⚠️ 顏色絕對不可以拿來表示方向。
+      色塊底色是固定的裝飾色，delta 一律是半透明白底，
+      「持平／上升／下降」由文字和箭頭承載。
+      沒有任何情況會把持平畫成紅色或綠色 —— 這是 CLAUDE.md 的規則一。
     """
-    if direction == "持平":
-        col.metric(label, value_text, "持平 " + diff_text,
-                   delta_color="off", help=help_text)
-    else:
-        col.metric(label, value_text, direction + " " + diff_text,
-                   delta_color="normal", help=help_text)
+    import html as _html
+    # ⚠️ title 屬性裡不能有真的換行 —— Streamlit 會把整段丟給 markdown 處理，
+    #   換行會把屬性切斷，HTML 就爛掉。換成 &#10;（tooltip 照樣會斷行）。
+    tip = _html.escape(help_text or "", quote=True).replace("\n", "&#10;")
+    col.markdown(
+        '<div class="kpi" style="background:%s" title="%s">'
+        '<div class="kpi-ico">%s</div><div>'
+        '<div class="kpi-label">%s</div>'
+        '<div class="kpi-value">%s</div>'
+        '<div class="kpi-delta">%s %s %s</div>'
+        '</div></div>' % (
+            KPI_TINT.get(tint, KPI_TINT["teal"]), tip,
+            icon, _html.escape(label), _html.escape(value_text),
+            _ARROW.get(direction, "→"), _html.escape(direction),
+            _html.escape(diff_text)),
+        unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -187,11 +292,20 @@ def measurement_condition():
 
 
 def page_header(title, subtitle=None):
-    """每一頁都從這裡開始：標題 ＋ 量測條件列 ＋ 右上角「示範資料」標記"""
+    """每一頁都從這裡開始：標題 ＋ 量測條件列 ＋ 右上角「示範資料」標記
+
+    版面照 Fluv 後台：標題與副標在左，麵包屑在右。
+    """
+    import html as _html
     st.markdown('<div class="demo-badge">示範資料</div>', unsafe_allow_html=True)
-    st.title(title)
-    if subtitle:
-        st.caption(subtitle)
+    st.markdown(
+        '<div class="page-head"><div>'
+        '<div class="ph-title">%s</div>%s'
+        '</div><div class="ph-crumb">GEO 監測平台 / <b>%s</b></div></div>' % (
+            _html.escape(title),
+            ('<div class="ph-sub">%s</div>' % _html.escape(subtitle)) if subtitle else '',
+            _html.escape(title)),
+        unsafe_allow_html=True)
 
     c = measurement_condition()
     if c is None:
@@ -299,14 +413,16 @@ def page_overview():
     kpi(c1, "能見度", "%.1f%%" % (cur["visibility"] * 100), d,
         "%+.1f pp" % (diff * 100),
         "有提到我們的回答佔比。%d / %d 則。\n\n95%% 信賴區間 %.1f%% ~ %.1f%%\n\n%s"
-        % (hits_cur, n_cur, cur["ci_low"] * 100, cur["ci_high"] * 100, why))
+        % (hits_cur, n_cur, cur["ci_low"] * 100, cur["ci_high"] * 100, why),
+        tint="teal", icon="👁")
 
     # 好感度：在「有提到我們」的那些回答裡，口氣是正面的佔多少
     pos_cur, pos_prev = round(cur["pos_pct"] * hits_cur), round(prev["pos_pct"] * hits_prev)
     d2, diff2, why2 = compare_proportions(pos_cur, hits_cur, pos_prev, hits_prev)
     kpi(c2, "好感度", "%.1f%%" % (cur["pos_pct"] * 100), d2,
         "%+.1f pp" % (diff2 * 100),
-        "被提到時口氣是正面的比例。%d / %d 則提及。\n\n%s" % (pos_cur, hits_cur, why2))
+        "被提到時口氣是正面的比例。%d / %d 則提及。\n\n%s" % (pos_cur, hits_cur, why2),
+        tint="amber", icon="💬")
 
     # 風險提及：負面而且會直接影響信任的那些
     risk_n = int(q("""SELECT COUNT(*) AS n FROM mentions m JOIN runs r ON r.id=m.run_id
@@ -318,7 +434,8 @@ def page_overview():
     kpi(c3, "風險提及", "%d 則" % risk_n, "持平" if d3 == "持平" else d3_disp,
         "%+.1f pp" % (diff3 * 100),
         "負面且屬於信任／急件類題目的提及（會直接影響成交）。\n\n"
-        "負面提及比例：%.1f%%\n\n%s" % (cur["neg_pct"] * 100, why3))
+        "負面提及比例：%.1f%%\n\n%s" % (cur["neg_pct"] * 100, why3),
+        tint="coral", icon="⚠️")
 
     # 平均排序：不是比例，沒有 Wilson 區間。
     # 用一個保守的門檻：差距小於 0.2 名就當作持平（樣本雜訊大約就是這個量級）。
@@ -328,7 +445,8 @@ def page_overview():
     d4 = "持平" if abs(dp) < 0.2 else ("上升" if dp < 0 else "下降")  # 排序變小 = 變前面 = 好
     kpi(c4, "平均排序", "第 %.2f 名" % pos_now, d4, "%+.2f 名" % dp,
         "我們被提到時平均排在第幾個（越小越前面）。\n\n"
-        "這不是比例，沒有 Wilson 區間；改用保守門檻：差距小於 0.2 名就當作持平。")
+        "這不是比例，沒有 Wilson 區間；改用保守門檻：差距小於 0.2 名就當作持平。",
+        tint="blue", icon="🏅")
 
     with st.expander("這些數字怎麼算出來的？（可以自己拿計算機驗算）"):
         st.markdown("""
@@ -354,8 +472,8 @@ def page_overview():
 
     # ---- 能見度趨勢圖（含信賴區間陰影 ＋ 行動標記線）---------------------
     st.subheader("能見度趨勢")
-    st.caption("藍色陰影是 95% 信賴區間 —— 線在陰影範圍內上下跳動不代表有變化。"
-               "橘色虛線是我們採取行動的日期，用來看「線是在哪次行動之後才開始往上」。")
+    st.caption("淺色陰影是 95% 信賴區間 —— 線在陰影範圍內上下跳動不代表有變化。"
+               "琥珀色虛線是我們採取行動的日期，用來看「線是在哪次行動之後才開始往上」。")
 
     x = list(range(len(weeks)))
     fig = go.Figure()
@@ -377,12 +495,12 @@ def page_overview():
         fig.add_vline(x=xi, line_dash="dash", line_color=C_ACTION, line_width=2,
                       annotation_text="▲ " + a["title"][:12],
                       annotation_position="top",
-                      annotation_font=dict(size=10, color="#b45309"))
+                      annotation_font=dict(size=10, color="#8a5d00"))
     fig.update_layout(height=380, margin=dict(t=40, b=10, l=10, r=10),
                       xaxis=dict(tickmode="array", tickvals=x, ticktext=weeks),
                       yaxis=dict(title="能見度 (%)", rangemode="tozero"),
                       showlegend=False, hovermode="x unified")
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig)
 
     if not acts.empty:
         st.caption("行動標記：" + " · ".join(
@@ -398,12 +516,16 @@ def page_overview():
         f2 = go.Figure()
         for name, col, color in [("正面", "pos_pct", C_POS), ("中性", "neu_pct", C_NEU),
                                  ("負面", "neg_pct", C_NEG)]:
+            # marker_line 是刻意的：堆疊區段之間要有 2px 的底色留白，
+            # 不然三個色塊直接相黏，邊界會糊掉。
             f2.add_trace(go.Bar(x=weeks, y=(t[col] * 100).round(1), name=name,
                                 marker_color=color,
+                                marker_line=dict(color="#ffffff", width=2),
                                 hovertemplate=name + " %{y:.1f}%<extra></extra>"))
         f2.update_layout(barmode="stack", height=330, margin=dict(t=20, b=10, l=10, r=10),
+                         bargap=0.28,
                          yaxis=dict(title="佔比 (%)"), legend=dict(orientation="h", y=1.12))
-        st.plotly_chart(f2, width="stretch")
+        st.plotly_chart(f2)
 
     with cB:
         st.subheader("各引擎表現")
@@ -419,12 +541,12 @@ def page_overview():
             error_x=dict(type="data", symmetric=False,
                          array=((eng["ci_high"] - eng["visibility"]) * 100),
                          arrayminus=((eng["visibility"] - eng["ci_low"]) * 100),
-                         color="#64748b"),
+                         color=C_MUTED),
             customdata=eng["n_samples"],
             hovertemplate="%{y}: %{x:.1f}%<br>樣本 %{customdata} 則<extra></extra>"))
         f3.update_layout(height=330, margin=dict(t=20, b=10, l=10, r=10),
                          xaxis=dict(title="能見度 (%)"))
-        st.plotly_chart(f3, width="stretch")
+        st.plotly_chart(f3)
         st.caption("注意每根誤差線都很長：單一引擎只有 %d 則樣本，"
                    "引擎之間的排名經常在誤差範圍內。"
                    % (int(eng["n_samples"].iloc[0]) if not eng.empty else 0))
@@ -438,14 +560,14 @@ def page_overview():
         n_all = total_runs()
         b["能見度"] = (b["runs_hit"] / n_all * 100).round(1)
         b["聲量佔比 SoV"] = (b["mentions"] / b["mentions"].sum() * 100).round(1)
-        colors = [C_US if int(u) else "#cbd5e1" for u in b["is_us"]]
+        colors = [C_US if int(u) else C_OTHER for u in b["is_us"]]
         f4 = go.Figure(go.Bar(x=b["entity"], y=b["能見度"], marker_color=colors,
                               text=b["能見度"].map(lambda v: "%.1f%%" % v),
                               textposition="outside",
                               hovertemplate="%{x}: %{y:.1f}%<extra></extra>"))
         f4.update_layout(height=320, margin=dict(t=20, b=10, l=10, r=10),
                          yaxis=dict(title="出現在多少比例的回答中 (%)"))
-        st.plotly_chart(f4, width="stretch")
+        st.plotly_chart(f4)
 
     st.divider()
 
@@ -737,7 +859,7 @@ def page_topics():
 
     fig = go.Figure(go.Heatmap(
         z=pivot.values, x=pivot.columns.tolist(), y=pivot.index.tolist(),
-        colorscale="Blues", zmin=0, zmax=max(60, float(pivot.values.max())),
+        colorscale=[[i / (len(C_SCALE) - 1), c] for i, c in enumerate(C_SCALE)], zmin=0, zmax=max(60, float(pivot.values.max())),
         text=[["%.0f%%" % v for v in row] for row in pivot.values],
         texttemplate="%{text}", textfont=dict(size=13),
         hovertemplate="%{y}<br>%{x}：%{z:.1f}%<extra></extra>",
@@ -746,7 +868,7 @@ def page_topics():
                       xaxis=dict(side="top"),
                       # plotly 預設把第一列畫在最下面，反轉過來我們才會在最上面
                       yaxis=dict(autorange="reversed"))
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig)
 
     st.divider()
     cA, cB = st.columns([1.3, 1])
@@ -811,11 +933,11 @@ def page_competitors():
         st.caption("所有品牌提及次數中，各家佔多少。")
         f = go.Figure(go.Pie(
             labels=b["entity"], values=b["mentions"], hole=0.45,
-            marker=dict(colors=[C_US if int(u) else "#cbd5e1" for u in b["is_us"]]),
+            marker=dict(colors=[C_US if int(u) else C_OTHER for u in b["is_us"]]),
             textinfo="label+percent",
             hovertemplate="%{label}：%{value} 次提及（%{percent}）<extra></extra>"))
         f.update_layout(height=340, margin=dict(t=10, b=10, l=10, r=10), showlegend=False)
-        st.plotly_chart(f, width="stretch")
+        st.plotly_chart(f)
 
     with c2:
         st.subheader("平均排序")
@@ -823,13 +945,13 @@ def page_competitors():
         bs = b.sort_values("avg_position")
         f = go.Figure(go.Bar(
             x=bs["avg_position"].round(2), y=bs["entity"], orientation="h",
-            marker_color=[C_US if int(u) else "#cbd5e1" for u in bs["is_us"]],
+            marker_color=[C_US if int(u) else C_OTHER for u in bs["is_us"]],
             text=bs["avg_position"].map(lambda v: "第 %.2f 名" % v),
             textposition="outside",
             hovertemplate="%{y}：第 %{x:.2f} 名<extra></extra>"))
         f.update_layout(height=340, margin=dict(t=10, b=10, l=10, r=10),
                         xaxis=dict(title="平均排序（越小越前面）"))
-        st.plotly_chart(f, width="stretch")
+        st.plotly_chart(f)
 
     st.divider()
     st.subheader("完整比較表")
@@ -938,15 +1060,15 @@ def page_sources():
         st.subheader("來源影響力排名")
         st.caption("被引用越多次、平均順位越前面的來源，影響力越大。")
         top = dom.head(12).sort_values("引用次數")
-        colors = [C_US if o else ("#ef4444" if lv == "🔴 高" else "#cbd5e1")
+        colors = [C_US if o else (C_ALERT if lv == "🔴 高" else C_OTHER)
                   for o, lv in zip(top["is_ours"], top["機會等級"])]
         f = go.Figure(go.Bar(x=top["引用次數"], y=top["domain"], orientation="h",
                              marker_color=colors,
                              hovertemplate="%{y}：被引用 %{x} 次<extra></extra>"))
         f.update_layout(height=420, margin=dict(t=10, b=10, l=10, r=10),
                         xaxis=dict(title="被引用次數"))
-        st.plotly_chart(f, width="stretch")
-        st.caption("藍色＝我們自己的網域，紅色＝高機會來源，灰色＝其他。")
+        st.plotly_chart(f)
+        st.caption("薄荷藍＝我們自己的網域，珊瑚紅＝高機會來源，灰色＝其他。")
 
     with cB:
         st.subheader("來源類型分布")
@@ -954,11 +1076,10 @@ def page_sources():
         by_type = dom.groupby("source_type")["引用次數"].sum().reset_index()
         f = go.Figure(go.Pie(labels=by_type["source_type"], values=by_type["引用次數"],
                              hole=0.45, textinfo="label+percent",
-                             marker=dict(colors=["#2563eb", "#60a5fa", "#94a3b8",
-                                                 "#cbd5e1", "#e2e8f0"]),
+                             marker=dict(colors=C_CAT),
                              hovertemplate="%{label}：%{value} 次<extra></extra>"))
         f.update_layout(height=420, margin=dict(t=10, b=10, l=10, r=10), showlegend=False)
-        st.plotly_chart(f, width="stretch")
+        st.plotly_chart(f)
         st.caption("固定分類：" + " / ".join(SOURCE_TYPES))
 
     st.divider()
@@ -1092,10 +1213,10 @@ def page_gaps():
         title, desc = CHANNEL_CARDS[ch]
         done = acts[acts["channel"] == ch]
         body = "".join(
-            "<br>✅ <b>%s</b><br><span style='font-size:12px;color:#64748b'>%s</span>"
+            "<br>✅ <b>%s</b><br><span style='font-size:12px;color:#898989'>%s</span>"
             % (html.escape(str(a["title"])), a["published_at"]) for _, a in done.iterrows())
         if not body:
-            body = "<br><span style='font-size:12px;color:#94a3b8'>尚未有行動</span>"
+            body = "<br><span style='font-size:12px;color:#9AA5AD'>尚未有行動</span>"
         col.markdown(
             '<div class="card"><h4>%s</h4><p>%s</p>%s</div>' % (title, desc, body),
             unsafe_allow_html=True)
