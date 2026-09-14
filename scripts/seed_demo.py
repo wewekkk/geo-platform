@@ -161,7 +161,16 @@ def write_raw_file(d, engine, prompt_id, sample_index, payload):
 # 主要流程
 # ---------------------------------------------------------------------------
 
-def seed(conn, verbose=True):
+# 用現有題庫產生示範資料時，每題的「基礎能見度」照意圖推。
+# 這條曲線是刻意的：discovery 類我們表現好，trust／urgent 類最弱 ——
+# 那正是「機會建議」頁會排在最前面的東西，讓示範資料講得出一個合理的故事。
+BASE_BY_INTENT = {
+    "discovery": 0.68, "comparison": 0.52, "logistics": 0.48,
+    "price": 0.42, "urgent": 0.26, "trust": 0.22,
+}
+
+
+def seed(conn, verbose=True, keep_prompts=False):
     cur = conn.cursor()
     weeks = last_n_mondays(8)
     latest = weeks[-1]
@@ -170,13 +179,28 @@ def seed(conn, verbose=True):
     # --- 1. 題庫 -----------------------------------------------------------
     from common import INTENT_WEIGHTS
     prompt_rows = []
-    for i, (text, topic, intent, base) in enumerate(PROMPTS, start=1):
-        cur.execute(
-            "INSERT INTO prompts (id, text, topic, intent, intent_weight, locale, "
-            "active, source, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-            (i, text, topic, intent, INTENT_WEIGHTS[intent], LOCALE, 1, "demo", now))
-        prompt_rows.append((i, text, topic, intent, base))
-    say(verbose, "  prompts             %d 筆" % len(prompt_rows))
+    if keep_prompts:
+        # 用資料庫裡已經有的 active 題目（例如從設定頁匯入的真題庫）
+        rows = cur.execute(
+            "SELECT id, text, topic, intent FROM prompts WHERE active = 1 ORDER BY id"
+        ).fetchall()
+        if not rows:
+            raise SystemExit("題庫裡沒有 active=1 的題目，沒辦法產生示範資料。")
+        for pid, text, topic, intent in rows:
+            base = BASE_BY_INTENT.get(intent, 0.45)
+            # 同一個意圖裡也要有高低差，否則每題數字一模一樣很假。
+            # 用題目 id 做確定性的偏移，重跑結果才會一樣。
+            base = max(0.05, min(0.92, base + ((pid * 37) % 21 - 10) / 100.0))
+            prompt_rows.append((pid, text, topic, intent, base))
+        say(verbose, "  prompts             沿用現有的 %d 題（--keep-prompts）" % len(prompt_rows))
+    else:
+        for i, (text, topic, intent, base) in enumerate(PROMPTS, start=1):
+            cur.execute(
+                "INSERT INTO prompts (id, text, topic, intent, intent_weight, locale, "
+                "active, source, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (i, text, topic, intent, INTENT_WEIGHTS[intent], LOCALE, 1, "demo", now))
+            prompt_rows.append((i, text, topic, intent, base))
+        say(verbose, "  prompts             %d 筆" % len(prompt_rows))
 
     # --- 2. 題目建議佇列 ---------------------------------------------------
     suggestions = [
@@ -197,6 +221,10 @@ def seed(conn, verbose=True):
         ("狗狗寄宿要打什麼疫苗？", "gsc",
          "GSC 曝光 2,100 次，但與媒合服務關聯較低", 0.41, "accepted"),
     ]
+    # 沿用現有題庫時不塞建議佇列 —— 那些建議是配著示範題庫寫的，
+    # 混進真題庫裡會看起來像系統真的提議了什麼。
+    if keep_prompts:
+        suggestions = []
     for text, src, ev, imp, status in suggestions:
         cur.execute(
             "INSERT INTO prompt_suggestions (text, source, evidence, est_importance, "
@@ -318,7 +346,7 @@ def seed(conn, verbose=True):
     say(verbose, "  citations           %d 筆" % n_citations)
 
     # --- 5. metrics_weekly -------------------------------------------------
-    n_metrics = seed_metrics(conn, weeks)
+    n_metrics = seed_metrics(conn, weeks, prompt_rows)
     say(verbose, "  metrics_weekly      %d 筆（最新一週是真的從上面算出來的）" % n_metrics)
 
     # --- 6. 缺口 -----------------------------------------------------------
@@ -395,7 +423,7 @@ def seed(conn, verbose=True):
     conn.commit()
 
 
-def seed_metrics(conn, weeks):
+def seed_metrics(conn, weeks, prompt_rows):
     """產生 metrics_weekly。
 
     最新一週：從剛剛塞進去的 runs／mentions **真的算出來**（含 Wilson 區間）
@@ -411,9 +439,12 @@ def seed_metrics(conn, weeks):
     dims = [("all", "all", "all", "1=1", ())]
     for engine, _ in ENGINES:
         dims.append((engine, "all", "all", "r.engine = ?", (engine,)))
-    for topic in sorted({p[1] for p in PROMPTS}):
+    # ⚠️ 主題／意圖的維度要從「實際用的題庫」取，不能用寫死的 PROMPTS 常數 ——
+    #   用 --keep-prompts 沿用真題庫時，主題名稱完全不一樣，
+    #   照常數取的話每一格都查不到資料，切主題的圖會整片空白。
+    for topic in sorted({p[2] for p in prompt_rows}):
         dims.append(("all", topic, "all", "p.topic = ?", (topic,)))
-    for intent in sorted({p[2] for p in PROMPTS}):
+    for intent in sorted({p[3] for p in prompt_rows}):
         dims.append(("all", "all", intent, "p.intent = ?", (intent,)))
 
     n = 0
@@ -524,9 +555,12 @@ def say(verbose, msg):
         print(msg)
 
 
-def clear(conn):
+def clear(conn, keep_prompts=False):
+    """清空示範資料。keep_prompts=True 時保留題庫（真題庫匯進來之後會用到）"""
     cur = conn.cursor()
     for t in TABLES:
+        if keep_prompts and t == "prompts":
+            continue
         cur.execute("DELETE FROM %s" % t)
         cur.execute("DELETE FROM sqlite_sequence WHERE name = ?", (t,))
     conn.commit()
@@ -544,6 +578,9 @@ def main():
     parser.add_argument("--force", action="store_true",
                         help="資料庫裡已經有資料時，清空後重塞")
     parser.add_argument("--quiet", action="store_true", help="不要印出過程")
+    parser.add_argument("--keep-prompts", action="store_true",
+                        help="保留現有題庫，只重新產生回答與指標"
+                             "（真題庫匯進來之後用這個）")
     args = parser.parse_args()
 
     try:
@@ -553,7 +590,7 @@ def main():
         return 1
 
     existing = conn.execute("SELECT COUNT(*) FROM prompts").fetchone()[0]
-    if existing and not args.force:
+    if existing and not args.force and not args.keep_prompts:
         real = conn.execute(
             "SELECT COUNT(*) FROM prompts WHERE source IS NULL OR source <> 'demo'"
         ).fetchone()[0]
@@ -566,10 +603,10 @@ def main():
 
     if existing:
         say(not args.quiet, "正在清空舊資料 ...")
-        clear(conn)
+        clear(conn, keep_prompts=args.keep_prompts)
 
     say(not args.quiet, "正在產生示範資料（數字全部是假的，只用來展示畫面）...")
-    seed(conn, verbose=not args.quiet)
+    seed(conn, verbose=not args.quiet, keep_prompts=args.keep_prompts)
     conn.close()
 
     print()
