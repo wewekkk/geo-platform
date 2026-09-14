@@ -66,6 +66,8 @@ C_POS = "#3E7D1E"                      # 正面 5.05:1
 C_NEU = "#9AA5AD"                      # 中性（發散色階的中點，本來就該是灰的）
 C_NEG = "#DC5257"                      # 負面 3.90:1
 C_ACTION = "#C08416"                   # 行動標記線 3.20:1
+C_CITE = "#6A4FA3"                     # 引用率（和 C_US 並排時色盲 ΔE 10.9）
+C_CITE_BAND = "rgba(106, 79, 163, 0.15)"
 C_ALERT = "#E8595E"                    # 高機會來源／風險
 C_INK = "#313131"                      # 主文字（同後台）
 C_MUTED = "#898989"                    # 次要文字（同後台）
@@ -150,8 +152,8 @@ st.markdown("""
 
   /* ───── KPI 色塊：後台那種飽和色塊 ───── */
   .kpi {
-      display: flex; align-items: center; gap: 14px;
-      border-radius: 5px; padding: 18px 16px; min-height: 104px;
+      display: flex; align-items: center; gap: 12px;
+      border-radius: 5px; padding: 18px 14px; min-height: 104px; height: 100%;
       box-shadow: rgba(68, 102, 242, 0.05) 1px 5px 24px 0px;
   }
   .kpi-ico {
@@ -160,7 +162,12 @@ st.markdown("""
       align-items: center; justify-content: center; font-size: 21px;
   }
   .kpi-label { font-size: 13px; color: rgba(255,255,255,.92); font-weight: 600; }
-  .kpi-value { font-size: 26px; color: #ffffff; font-weight: 700; line-height: 1.25; }
+  /* nowrap 是必要的：五欄並排時「第 1.77 名」會折行，
+     那一塊就比其他四塊高，整列對不齊。 */
+  .kpi-value {
+      font-size: 25px; color: #ffffff; font-weight: 700; line-height: 1.25;
+      white-space: nowrap;
+  }
   /* ⚠️ delta 一律用半透明白底，顏色不帶方向意義 ——
      方向由「持平／上升／下降」這幾個字承載，不是顏色。
      這樣才不會把隨機波動畫成紅色（見 CLAUDE.md 規則一）。 */
@@ -231,7 +238,7 @@ def compare_proportions(succ_now, n_now, succ_prev, n_prev):
 
 
 # KPI 色塊的底色，取自後台儀表板（純裝飾用，不帶好壞的意思）
-KPI_TINT = {"teal": "#13c9ca", "amber": "#ffbc58",
+KPI_TINT = {"teal": "#13c9ca", "amber": "#ffbc58", "purple": "#8b6fd4",
             "coral": "#ff8084", "blue": "#00a8ff", "gray": "#a5a5a5"}
 _ARROW = {"持平": "→", "上升": "↑", "下降": "↓", "增加": "↑", "減少": "↓"}
 
@@ -407,7 +414,7 @@ def page_overview():
     n_cur, n_prev = int(cur["n_samples"]), int(prev["n_samples"])
     hits_cur, hits_prev = round(cur["visibility"] * n_cur), round(prev["visibility"] * n_prev)
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
 
     d, diff, why = compare_proportions(hits_cur, n_cur, hits_prev, n_prev)
     kpi(c1, "能見度", "%.1f%%" % (cur["visibility"] * 100), d,
@@ -416,10 +423,23 @@ def page_overview():
         % (hits_cur, n_cur, cur["ci_low"] * 100, cur["ci_high"] * 100, why),
         tint="teal", icon="👁")
 
+    # 引用率：AI 把我們的網域當成資料來源的回答佔比。
+    # ⚠️ 這和能見度是兩件事 ——「被提到」是講出品牌名，「被引用」是附上我們的連結。
+    #   內容行動（draft.py → actions）直接影響的是這個，所以評估成效要看它。
+    cite_cur = round(cur["citation_rate"] * n_cur)
+    cite_prev = round(prev["citation_rate"] * n_prev)
+    dc, diffc, whyc = compare_proportions(cite_cur, n_cur, cite_prev, n_prev)
+    kpi(c2, "引用率", "%.1f%%" % (cur["citation_rate"] * 100), dc,
+        "%+.1f pp" % (diffc * 100),
+        "AI 把我們的網域當成資料來源的回答佔比（不只是提到名字）。%d / %d 則。"
+        "\n\n95%% 信賴區間 %.1f%% ~ %.1f%%\n\n%s"
+        % (cite_cur, n_cur, cur["cite_ci_low"] * 100, cur["cite_ci_high"] * 100, whyc),
+        tint="purple", icon="🔗")
+
     # 好感度：在「有提到我們」的那些回答裡，口氣是正面的佔多少
     pos_cur, pos_prev = round(cur["pos_pct"] * hits_cur), round(prev["pos_pct"] * hits_prev)
     d2, diff2, why2 = compare_proportions(pos_cur, hits_cur, pos_prev, hits_prev)
-    kpi(c2, "好感度", "%.1f%%" % (cur["pos_pct"] * 100), d2,
+    kpi(c3, "好感度", "%.1f%%" % (cur["pos_pct"] * 100), d2,
         "%+.1f pp" % (diff2 * 100),
         "被提到時口氣是正面的比例。%d / %d 則提及。\n\n%s" % (pos_cur, hits_cur, why2),
         tint="amber", icon="💬")
@@ -431,7 +451,7 @@ def page_overview():
     d3, diff3, why3 = compare_proportions(neg_cur, hits_cur, neg_prev, hits_prev)
     # 風險是「越少越好」，所以方向要反過來標示
     d3_disp = {"上升": "增加", "下降": "減少", "持平": "持平"}[d3]
-    kpi(c3, "風險提及", "%d 則" % risk_n, "持平" if d3 == "持平" else d3_disp,
+    kpi(c4, "風險提及", "%d 則" % risk_n, "持平" if d3 == "持平" else d3_disp,
         "%+.1f pp" % (diff3 * 100),
         "負面且屬於信任／急件類題目的提及（會直接影響成交）。\n\n"
         "負面提及比例：%.1f%%\n\n%s" % (cur["neg_pct"] * 100, why3),
@@ -443,7 +463,7 @@ def page_overview():
     pos_was = prev["avg_position"] or 0
     dp = pos_now - pos_was
     d4 = "持平" if abs(dp) < 0.2 else ("上升" if dp < 0 else "下降")  # 排序變小 = 變前面 = 好
-    kpi(c4, "平均排序", "第 %.2f 名" % pos_now, d4, "%+.2f 名" % dp,
+    kpi(c5, "平均排序", "第 %.2f 名" % pos_now, d4, "%+.2f 名" % dp,
         "我們被提到時平均排在第幾個（越小越前面）。\n\n"
         "這不是比例，沒有 Wilson 區間；改用保守門檻：差距小於 0.2 名就當作持平。",
         tint="blue", icon="🏅")
@@ -470,37 +490,54 @@ def page_overview():
 
     st.divider()
 
-    # ---- 能見度趨勢圖（含信賴區間陰影 ＋ 行動標記線）---------------------
-    st.subheader("能見度趨勢")
+    # ---- 兩張趨勢圖：能見度 ＋ 引用率 -------------------------------------
+    #
+    # ⚠️ 兩者不可以共用同一個 y 軸。引用率的絕對值比能見度小一個量級，
+    #   疊在同一張圖上會被壓成一條貼著底的平線，而且雙 y 軸會誤導比例。
+    #   分成兩張並排（小倍數圖），各自的 y 軸範圍獨立。
+    st.subheader("趨勢")
     st.caption("淺色陰影是 95% 信賴區間 —— 線在陰影範圍內上下跳動不代表有變化。"
-               "琥珀色虛線是我們採取行動的日期，用來看「線是在哪次行動之後才開始往上」。")
+               "琥珀色虛線是我們採取行動的日期，用來看「線是在哪次行動之後才開始往上」。"
+               "**評估內容行動有沒有效，看右邊的引用率** —— 那是我們寫的文章直接影響的東西。")
 
     x = list(range(len(weeks)))
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x + x[::-1],
-                             y=(t["ci_high"] * 100).tolist() + (t["ci_low"] * 100).tolist()[::-1],
-                             fill="toself", fillcolor=C_BAND, line=dict(width=0),
-                             hoverinfo="skip", name="95% 信賴區間"))
-    fig.add_trace(go.Scatter(x=x, y=(t["visibility"] * 100).round(1),
-                             mode="lines+markers", line=dict(color=C_US, width=3),
-                             name="能見度",
-                             customdata=t["n_samples"],
-                             hovertemplate="能見度 %{y:.1f}%<br>樣本數 %{customdata} 則<extra></extra>"))
-
     acts = q("SELECT * FROM actions WHERE published_at IS NOT NULL ORDER BY published_at")
-    for _, a in acts.iterrows():
-        xi = week_index_of(a["published_at"], weeks)
-        if xi is None:
-            continue
-        fig.add_vline(x=xi, line_dash="dash", line_color=C_ACTION, line_width=2,
-                      annotation_text="▲ " + a["title"][:12],
-                      annotation_position="top",
-                      annotation_font=dict(size=10, color="#8a5d00"))
-    fig.update_layout(height=380, margin=dict(t=40, b=10, l=10, r=10),
-                      xaxis=dict(tickmode="array", tickvals=x, ticktext=weeks),
-                      yaxis=dict(title="能見度 (%)", rangemode="tozero"),
-                      showlegend=False, hovermode="x unified")
-    st.plotly_chart(fig)
+
+    def trend_fig(val_col, lo_col, hi_col, name, color, band, y_title):
+        """畫一條趨勢線 ＋ 信賴區間陰影 ＋ 行動標記線"""
+        f = go.Figure()
+        f.add_trace(go.Scatter(
+            x=x + x[::-1],
+            y=(t[hi_col] * 100).tolist() + (t[lo_col] * 100).tolist()[::-1],
+            fill="toself", fillcolor=band, line=dict(width=0),
+            hoverinfo="skip", name="95% 信賴區間"))
+        f.add_trace(go.Scatter(
+            x=x, y=(t[val_col] * 100).round(1),
+            mode="lines+markers", line=dict(color=color, width=3),
+            name=name, customdata=t["n_samples"],
+            hovertemplate=name + " %{y:.1f}%<br>樣本數 %{customdata} 則<extra></extra>"))
+        for _, a in acts.iterrows():
+            xi = week_index_of(a["published_at"], weeks)
+            if xi is None:
+                continue
+            f.add_vline(x=xi, line_dash="dash", line_color=C_ACTION, line_width=2,
+                        annotation_text="▲", annotation_position="top",
+                        annotation_font=dict(size=11, color="#8a5d00"))
+        f.update_layout(height=360, margin=dict(t=40, b=10, l=10, r=10),
+                        xaxis=dict(tickmode="array", tickvals=x, ticktext=weeks),
+                        yaxis=dict(title=y_title, rangemode="tozero"),
+                        showlegend=False, hovermode="x unified")
+        return f
+
+    tA, tB = st.columns(2)
+    with tA:
+        st.markdown("**能見度** —— AI 有沒有講出我們的名字")
+        st.plotly_chart(trend_fig("visibility", "ci_low", "ci_high",
+                                  "能見度", C_US, C_BAND, "能見度 (%)"))
+    with tB:
+        st.markdown("**引用率** —— AI 有沒有把我們的網站當成資料來源")
+        st.plotly_chart(trend_fig("citation_rate", "cite_ci_low", "cite_ci_high",
+                                  "引用率", C_CITE, C_CITE_BAND, "引用率 (%)"))
 
     if not acts.empty:
         st.caption("行動標記：" + " · ".join(

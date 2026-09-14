@@ -125,6 +125,12 @@ SCHEMA = [
         visibility    REAL,                              -- 能見度：有提到我們的回答佔比 0~1
         ci_low        REAL,                              -- 信賴區間下界（Wilson）
         ci_high       REAL,                              -- 信賴區間上界（Wilson）
+        -- 引用率：AI 把我們的網域當成資料來源的回答佔比 0~1。
+        -- 和能見度是兩件事 ——「被提到」是講出品牌名，「被引用」是附上我們的連結。
+        -- 內容行動（draft.py → actions）直接影響的是這個，不是能見度。
+        citation_rate REAL,
+        cite_ci_low   REAL,                              -- 引用率的信賴區間下界
+        cite_ci_high  REAL,                              -- 引用率的信賴區間上界
         sov           REAL,                              -- 聲量佔比 Share of Voice 0~1
         avg_position  REAL,                              -- 平均排序（越小越前面）
         sentiment_avg REAL,                              -- 平均情緒分數 -1~1

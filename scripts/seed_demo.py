@@ -250,10 +250,19 @@ def seed(conn, verbose=True):
 
                 answer, snippets = build_answer(text, mentioned, sentiments)
 
-                # 這則有沒有附引用來源（大約四分之一有，湊成數十筆）
+                # 這則有沒有附引用來源（大約四分之一有）
+                #
+                # 引用不是隨機灑的：AI 會引用我們的網域，通常是因為它正在講我們。
+                # 所以「有提到我們」時才比較可能引用 fluv.com —— 這個相關性要留著，
+                # 不然引用率和能見度會看起來毫無關係，示範資料就誤導了。
                 cites = []
-                if random.random() < 0.055:
-                    pool = random.sample(DOMAIN_POOL, random.randint(2, 4))
+                if random.random() < 0.28:
+                    others = [d for d in DOMAIN_POOL if not d[2]]
+                    pool = random.sample(others, random.randint(2, 3))
+                    ours_pool = [d for d in DOMAIN_POOL if d[2]]
+                    p_cite_us = 0.90 if OUR_BRAND in mentioned else 0.04
+                    if ours_pool and random.random() < p_cite_us:
+                        pool.insert(random.randint(0, len(pool)), random.choice(ours_pool))
                     for rank, (dom, stype, ours) in enumerate(pool, start=1):
                         cites.append({
                             "url": "https://%s/article/%d" % (dom, random.randint(100, 999)),
@@ -438,12 +447,23 @@ def seed_metrics(conn, weeks):
             "JOIN mentions m ON m.run_id = r.id AND m.is_us = 1 WHERE " + where,
             params).fetchone()
 
+        # 其中有幾則引用了我們的網域（引用率的分子）
+        cites = cur.execute(
+            "SELECT COUNT(DISTINCT r.id) FROM runs r JOIN prompts p ON p.id = r.prompt_id "
+            "JOIN citations c ON c.run_id = r.id "
+            "JOIN domains d ON d.domain = c.domain AND d.is_ours = 1 WHERE " + where,
+            params).fetchone()[0]
+
         vis = hits / total
         low, high = wilson_interval(hits, total)
+        cite_rate = cites / total
+        c_low, c_high = wilson_interval(cites, total)
         sov = (us_m or 0) / all_m if all_m else 0
         sc = sent[4] or 0
         rows_latest = dict(
-            visibility=vis, ci_low=low, ci_high=high, sov=sov,
+            visibility=vis, ci_low=low, ci_high=high,
+            citation_rate=cite_rate, cite_ci_low=c_low, cite_ci_high=c_high,
+            sov=sov,
             avg_position=avg_pos, sentiment_avg=sent[0] or 0,
             pos_pct=(sent[1] or 0) / sc if sc else 0,
             neu_pct=(sent[2] or 0) / sc if sc else 0,
@@ -460,12 +480,20 @@ def seed_metrics(conn, weeks):
             v = max(0.02, min(0.97, vis + deltas[i] + wobble[i]))
             h = int(round(v * total))
             lo, hi = wilson_interval(h, total)
+            # 引用率的成長比能見度更陡 —— 內容行動直接打的就是它。
+            # 用等比（不是等差）往回推，否則基數小的時候會被夾到 0，
+            # 趨勢圖上就變成一條貼著底的平線。
+            cv = max(0.0, min(0.97,
+                              cite_rate * (1 + deltas[i] * 3.6) + wobble[i] * 0.35))
+            ch = int(round(cv * total))
+            clo, chi = wilson_interval(ch, total)
             shift = deltas[i] * 0.5   # 早期的情緒也差一點
             pos = max(0.0, rows_latest["pos_pct"] + shift)
             neg = min(1.0, rows_latest["neg_pct"] - shift * 0.6)
             neu = max(0.0, 1.0 - pos - neg)
             _insert_metric(cur, week_label(wk), engine, topic, intent, dict(
                 visibility=h / total, ci_low=lo, ci_high=hi,
+                citation_rate=ch / total, cite_ci_low=clo, cite_ci_high=chi,
                 sov=max(0.02, rows_latest["sov"] + deltas[i] * 0.6),
                 avg_position=(rows_latest["avg_position"] or 2.5) - deltas[i] * 2.2,
                 sentiment_avg=rows_latest["sentiment_avg"] + shift,
@@ -477,10 +505,13 @@ def seed_metrics(conn, weeks):
 def _insert_metric(cur, week, engine, topic, intent, v):
     cur.execute(
         "INSERT OR REPLACE INTO metrics_weekly (week, engine, topic, intent, "
-        "visibility, ci_low, ci_high, sov, avg_position, sentiment_avg, "
-        "pos_pct, neu_pct, neg_pct, n_samples) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "visibility, ci_low, ci_high, citation_rate, cite_ci_low, cite_ci_high, "
+        "sov, avg_position, sentiment_avg, "
+        "pos_pct, neu_pct, neg_pct, n_samples) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (week, engine, topic, intent,
          round(v["visibility"], 4), round(v["ci_low"], 4), round(v["ci_high"], 4),
+         round(v["citation_rate"], 4), round(v["cite_ci_low"], 4),
+         round(v["cite_ci_high"], 4),
          round(v["sov"], 4),
          round(v["avg_position"], 2) if v["avg_position"] else None,
          round(v["sentiment_avg"], 3),
