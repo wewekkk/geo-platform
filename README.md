@@ -1,12 +1,115 @@
 # Fluv GEO 監測平台
 
-追蹤品牌「Fluv 毛小愛」在各家 AI 助理回答中的能見度。
+> 追蹤品牌「Fluv 毛小愛」在各家 AI 助理回答中的能見度與引用率。
+> 內部自用工具 · Python ＋ SQLite ＋ Streamlit
 
-目前進度：**階段 5（部分）— 指標、缺口、草稿骨架與寫作規則都完成；階段 1 的 API 等金鑰驗收**
-`collect.py` 寫好了，Gemini／OpenAI／Anthropic／Perplexity 四家都能跑，各自的網路搜尋工具都開著。
-新增 `read_runs.py` 可以把存下來的原文讀出來檢查。
-**目前預設只跑 Gemini**（它的免費額度包含搜尋，不用綁卡），其他三家隨時可以加上去。
-**還沒有真的跑過** —— 需要先填入 API 金鑰（見下面「階段 1 怎麼跑」）。
+**這個系統的產出是數字，而數字是唯一一種會安靜錯掉的東西。**
+程式壞了會噴錯，數字錯了不會 —— 它照樣畫得漂漂亮亮，只是內容是假的。
+所以這個專案大部分的設計不在「怎麼量」，在「怎麼讓量錯的時候有人發現」。
+
+---
+
+## 流程
+
+```mermaid
+flowchart TD
+    P(["人：題庫<br/>prompts"]) --> C
+
+    C["collect.py<br/>去問 AI，存原文"]
+    PA["parse.py<br/>判讀：提到誰、排第幾、口氣"]
+    AG["aggregate.py<br/>算指標 ＋ 信賴區間"]
+    GP["gaps.py<br/>找缺口、排機會分數"]
+    DR["draft.py<br/>產標題／大綱／骨架"]
+    HU(["人：審稿、發佈<br/>登記 actions"])
+
+    C -->|"data/raw/ 的 gzip 原文<br/>＋ runs"| PA
+    PA -->|"mentions<br/>citations"| AG
+    AG -->|metrics_weekly| GP
+    GP -->|"gaps<br/>status=open"| DR
+    DR -->|"drafts<br/>status=draft"| HU
+    HU -.->|"過幾週回來再量一次"| C
+
+    AP["app.py<br/>儀表板八頁<br/>讀全部的表，不寫"]
+    AG -.-> AP
+    GP -.-> AP
+    HU -.-> AP
+
+    classDef blocked fill:#fdecec,stroke:#E8595E,stroke-width:2px,color:#8a2a2e
+    classDef ready fill:#e6f4f8,stroke:#0B8CA8,stroke-width:1.5px,color:#0a4555
+    classDef human fill:#fdf3e0,stroke:#C08416,stroke-width:1.5px,color:#6b4a0c
+    classDef view fill:#f1edf8,stroke:#6A4FA3,stroke-width:1.5px,color:#3d2c63
+
+    class C,PA blocked
+    class AG,GP,DR ready
+    class P,HU human
+    class AP view
+```
+
+<table>
+<tr>
+<td>🟥 <b>紅色</b></td><td>目前卡住 —— <code>collect.py</code> 等 API 金鑰、<code>parse.py</code> 刻意還沒寫（見下）</td>
+</tr>
+<tr>
+<td>🟦 <b>藍色</b></td><td>可以跑</td>
+</tr>
+<tr>
+<td>🟧 <b>橘色</b></td><td>人工，刻意不自動化</td>
+</tr>
+<tr>
+<td>🟪 <b>紫色</b></td><td>只讀不寫</td>
+</tr>
+</table>
+
+六步是一個閉環。第 6 步回到第 1 步，而「這次的數字跟上次比有沒有**真的**變化」
+就是整個系統存在的理由。
+
+### 兩個主指標要分開看
+
+```mermaid
+flowchart LR
+    Q(["客戶問 AI 一個問題"]) --> V & CI
+
+    V["被提到　能見度<br/>AI 講出「Fluv 毛小愛」這幾個字"]
+    CI["被引用　引用率<br/>AI 把 fluv.com 當成資料來源"]
+
+    V --> VW["間接影響<br/>隔著聲量、媒體、第三方名單<br/>寫一篇文章幾乎動不了"]
+    CI --> CW["直接影響<br/>寫對內容就打得到<br/>← 評估成效看這個"]
+
+    classDef vis fill:#e6f4f8,stroke:#0B8CA8,stroke-width:1.5px,color:#0a4555
+    classDef cit fill:#f1edf8,stroke:#6A4FA3,stroke-width:2px,color:#3d2c63
+    classDef note fill:#ffffff,stroke:#cbd5da,color:#444,stroke-dasharray:3 3
+    classDef q fill:#fdf3e0,stroke:#C08416,color:#6b4a0c
+
+    class Q q
+    class V vis
+    class CI cit
+    class VW,CW note
+```
+
+所以趨勢圖上的**行動標記線要配引用率**才看得出因果。
+
+---
+
+## 目前狀態
+
+| 階段 | 內容 | 狀態 |
+|---|---|---|
+| 0 | 骨架：十張表、七頁畫面、示範資料 | ✅ 完成 |
+| 1 | 真的問得到 AI：`collect.py` ＋ `read_runs.py` | 🟡 程式完成，等金鑰 |
+| 2 | 判讀器：100 則人工盲測標記 → `parse.py` | 🔴 刻意未開始 |
+| 3 | 指標與信賴區間：`aggregate.py` | ✅ 完成，引用率可人工驗算 |
+| 4 | 缺口與行動：`gaps.py` | ✅ 完成 |
+| 5 | 自動長大：`draft.py` ＋ `suggest.py` | 🟡 草稿完成，GSC 未接 |
+| 6 | 網站健檢：`audit.py` | ⬜ 未開始（不需要 API） |
+
+**為什麼階段 2 刻意不做：** 規範訂了順序 —— 先有標準答案，才能有判讀器。
+要先人工**盲測**標記 100 則（標記的人不能知道哪個品牌是客戶，否則標準答案本身就帶偏了），
+判讀器跟它的一致率 ≥ 90% 才准往下走。這是整個專案唯一真正的品質關卡。
+
+**為什麼階段 1 卡住：** 各家的網路搜尋功能都要付費帳戶。
+Gemini 原本有免費搜尋額度，但那個額度掛在**已下架**的 2.5 Flash 上，
+現存模型的搜尋額度是 0。不開搜尋的話問到的是模型的記憶，不是查來的資料 ——
+數字會看起來完全正常，但意義是錯的，所以寧可不跑。
 
 ---
 
