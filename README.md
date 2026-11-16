@@ -294,6 +294,38 @@ python scripts/draft.py --check 我的文章.md     # 拿四條規則檢查一�
 
 ---
 
+## 備份 data/（它不在版控裡）
+
+```bash
+python scripts/backup.py                       # 打包到 backups/
+python scripts/backup.py --list                # 看有哪些備份
+python scripts/backup.py --verify <備份檔>       # 確認那份解得開、內容完整
+```
+
+`data/` 被 `.gitignore` 排除，所以 `git push` 不會保護到它。
+而它是整個專案唯一不可重建的資產 —— 程式壞了可以重寫，原始回答刪了就沒了。
+
+**做完備份一定要跑一次 `--verify`。** 備份最糟的失敗方式是
+「以為有備份，要用的時候才發現解不開」。
+
+⚠️ **備份在同一顆硬碟上，只能防手殘刪掉，不能防硬碟壞掉。**
+打包完要再複製一份到 Google Drive 或隨身碟。
+
+### 目前的資料其實大多可以重建
+
+| 來源 | 筆數 | 萬一遺失 |
+|---|---|---|
+| `seed_demo.py` 的亂數 | 1,200 | ✅ 重跑 `seed_demo.py` |
+| 九月基準測試試算表 | 80 | ✅ 試算表還在 Google Drive |
+| 兩份 Google 文件 | 16 | ✅ 文件還在 Google Drive |
+
+**所以現在備份的急迫性沒那麼高。**
+但等 `collect.py` 透過 API 真的跑起來之後，那些回答就會變成**世界上唯一一份** ——
+AI 的回答每次都不同，同一題再問一次得到的不會是同一個答案。
+那時候每跑完一輪就該備份一次。
+
+---
+
 ## 七頁畫面
 
 | 頁 | 看什麼 |
@@ -327,6 +359,7 @@ N=10 · condition=api · locale=tw · 上次跑批 2026-08-31 03:22:10
 | `app.py` | ✅ 可用 | 全部的表 → 七頁畫面 |
 | `collect.py` | ✅ 可用 | 題庫 → 每題×每引擎跑 N 次 → 原文存 gzip、metadata 進 `runs` |
 | `read_runs.py` | ✅ 可用 | `runs` ＋ gzip 原始檔 → 把原文印出來給人讀（只讀不寫） |
+| `backup.py` | ✅ 可用 | `data/` → 一個 `.tar.gz` 備份檔（含驗證功能） |
 | `parse.py` | 🔧 空殼（階段 2） | 原文 → 便宜模型逐則判讀 → `mentions`／`citations`／`domains` |
 | `aggregate.py` | ✅ 可用 | 判讀結果 → 算指標與信賴區間 → `metrics_weekly` |
 | `gaps.py` | ✅ 可用 | 指標 → 找缺席題目群、算機會分數 → `gaps` |

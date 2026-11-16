@@ -15,3 +15,7 @@ venv/
 .DS_Store
 .vscode/
 .idea/
+
+# 備份檔（backup.py 的產出）。1.6 MB 的二進位檔不該進版控，
+# 而且它是 data/ 的壓縮版，data/ 本來就被排除了。
+backups/
