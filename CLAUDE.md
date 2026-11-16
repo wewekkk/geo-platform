@@ -160,6 +160,8 @@ data/raw/{年}/W{週}/{引擎}/{prompt_id}_{locale}_{sample_index}.json.gz
 | `audit.py` | 自家網址清單、`gaps` | `page_audits` |
 | `read_runs.py` | `runs`、`data/raw/` | **什麼都不寫** |
 | `backup.py` | `data/` | `backups/*.tar.gz`（版控外） |
+| `eval/label.py` | `runs`、`data/raw/`（**唯讀**）、`mentions`（只取品牌名單） | `eval/labeled.csv` |
+| `eval/check_judge.py` | `eval/labeled.csv`、`mentions` | **什麼都不寫**（只回傳結束代碼） |
 | `app.py` | 全部的表 | 只有「設定」頁寫 `prompts`、`gaps.status`、`actions` |
 
 人只手動維護三張表：`prompts`（題庫）、`actions`（行動紀錄），
@@ -186,7 +188,7 @@ data/raw/{年}/W{週}/{引擎}/{prompt_id}_{locale}_{sample_index}.json.gz
 
 ---
 
-## 十支腳本的職責
+## 十二支腳本的職責
 
 | 腳本 | 頻率 | 吃 → 做 → 吐 |
 |---|---|---|
@@ -199,6 +201,8 @@ data/raw/{年}/W{週}/{引擎}/{prompt_id}_{locale}_{sample_index}.json.gz
 | `audit.py` | 手動 | 自家網址清單 → 抓頁面做規則檢查 → `page_audits`（階段 6） |
 | `read_runs.py` | 隨時 | `runs` ＋ gzip 原文 → 印在畫面上給人讀（**只讀不寫**） |
 | `backup.py` | 跑批後 | `data/` → 一個 `.tar.gz` 備份檔（含還原驗證） |
+| `eval/label.py` | 階段 2 一次 | 原文 → **遮蔽品牌名**後請人標 → `eval/labeled.csv` |
+| `eval/check_judge.py` | 改判讀器後 | 標準答案 ＋ `mentions` → 一致率報告（< 90% 回傳非 0） |
 | `app.py` | 隨時 | 全部的表 → Streamlit 八頁畫面 |
 
 ＋ 一個共用模組：`writing_rules.py` —— 四條寫作規則的檢查函式，
@@ -369,8 +373,30 @@ opportunity_score = (受影響題數 × 意圖權重 × 缺席程度) ÷ 補齊�
 可能不是內容不夠，而是結構讓模型讀不到。
 
 抓自己的頁面做規則比對，**不呼叫任何 AI API、不花錢**。
-「答案位置」「事實密度」「標題是不是一個問題」這幾項直接用
-`writing_rules.py` 的同一份函式，不是各寫一次。
+唯一的網路行為是 GET 自家網址。
+
+**十項檢查**（上限就是十項 —— 項目多到五十幾項就沒人會照著改）：
+
+| # | 檢查 | 層級 |
+|---|---|---|
+| 1 | `robots.txt` 有沒有擋掉 AI 爬蟲（GPTBot／ClaudeBot／PerplexityBot／Google-Extended…） | 網站 |
+| 2 | 有沒有 `llms.txt` | 網站 |
+| 3 | 頁面抓得到，**而且正文在 HTML 裡**（內容靠 JS 載入的話爬蟲看到的是空殼） | 頁面 |
+| 4 | schema.org 標記：`FAQPage` / `Article` / `Organization` | 頁面 |
+| 5 | 一頁一個 `h1` | 頁面 |
+| 6 | `h2` 是不是明確的問題 | 頁面 |
+| 7 | 信任訊號（作者署名／關於我們／引用外部來源） | 頁面 |
+| 8 | 標題是一個明確問題 ← `writing_rules.py` | 頁面 |
+| 9 | 答案在段落開頭 ← `writing_rules.py` | 頁面 |
+| 10 | 事實密度、行銷形容詞 ← `writing_rules.py` | 頁面 |
+
+後三項直接用 `writing_rules.py` 的同一份函式，不是各寫一次。
+解析 HTML 用標準函式庫的 `html.parser`，不裝 BeautifulSoup ——
+要的東西很結構化，stdlib 夠用，少一個套件少一件要維護的事。
+
+`--cited` 會去檢查「AI 已經引用過的自家頁面」當**對照組** ——
+一個能被引用的頁面長什麼樣，從它們身上看得出來。拿它們跟沒被引用的頁面比，
+差異就是該補的東西。
 
 ---
 

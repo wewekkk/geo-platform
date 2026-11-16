@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-init_db.py — 建立資料庫與十張表
+init_db.py — 建立資料庫與十一張表
 
 吃什麼 → 做什麼 → 吐什麼
   吃：什麼都不用吃（頂多給一個 --db 指定資料庫要放哪）
-  做：建立 data/geo.db，照 CLAUDE.md 的資料模型建好十張表與索引
+  做：建立 data/geo.db，照 CLAUDE.md 的資料模型建好十一張表與索引
   吐：一個空的 data/geo.db（沒有資料，只有結構）
 
 怎麼跑
@@ -30,7 +30,7 @@ from common import DEFAULT_DB_PATH, RAW_DIR  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# 十張表的定義
+# 十一張表的定義
 # 順序有意義：被別人參照的表要先建（例如 prompts 要在 runs 之前）
 # ---------------------------------------------------------------------------
 
@@ -180,10 +180,26 @@ SCHEMA = [
         action_id  INTEGER REFERENCES actions(id),       -- 這篇草稿最後變成哪一筆行動
         created_at TEXT NOT NULL
     )"""),
+
+    # 11. 自家頁面的 AI 可讀性檢查結果 —— 自動（階段 6 的 audit.py）
+    #     一個頁面一次檢查會有多列，一列一個檢查項目。
+    #     保留歷史：照著改完之後重跑，可以比對前後差異。
+    ("page_audits", """
+    CREATE TABLE IF NOT EXISTS page_audits (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        url        TEXT    NOT NULL,
+        checked_at TEXT    NOT NULL,
+        check_key  TEXT    NOT NULL,                     -- 哪一項檢查，例如 robots_ai_crawlers
+        passed     INTEGER NOT NULL,                     -- 1=通過 0=沒通過
+        detail     TEXT,                                 -- 為什麼過／沒過，給人看的
+        severity   TEXT                                  -- high|medium
+    )"""),
 ]
 
 # 索引：只建查詢真的會用到的，不多建
 INDEXES = [
+    # page_audits 幾乎只會「查某個網址最近一次的結果」，所以照 url + 時間建
+    "CREATE INDEX IF NOT EXISTS idx_audits_url    ON page_audits(url, checked_at)",
     "CREATE INDEX IF NOT EXISTS idx_runs_prompt   ON runs(prompt_id)",
     "CREATE INDEX IF NOT EXISTS idx_runs_ts       ON runs(ts)",
     "CREATE INDEX IF NOT EXISTS idx_runs_engine   ON runs(engine)",
@@ -219,7 +235,7 @@ def show_tables(db_path):
 
 
 def init_db(db_path, force=False):
-    """建立資料庫與十張表"""
+    """建立資料庫與十一張表"""
     # data/ 與 data/raw/ 資料夾先確保存在
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     os.makedirs(RAW_DIR, exist_ok=True)
@@ -244,7 +260,7 @@ def init_db(db_path, force=False):
     conn.close()
 
     print()
-    print("完成。十張表都建好了：%s" % db_path)
+    print("完成。十一張表都建好了：%s" % db_path)
     print("下一步：python scripts/seed_demo.py   （塞入示範資料）")
 
 
@@ -270,7 +286,7 @@ def main():
         return
 
     if args.force and os.path.exists(args.db):
-        print("警告：--force 會刪掉 %s 裡面全部十張表的資料，且無法復原。" % args.db)
+        print("警告：--force 會刪掉 %s 裡面全部十一張表的資料，且無法復原。" % args.db)
         answer = input("確定要繼續嗎？請輸入 yes 再按 Enter：").strip()
         if answer != "yes":
             print("已取消，沒有動任何資料。")

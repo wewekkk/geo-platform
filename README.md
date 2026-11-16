@@ -464,9 +464,12 @@ N=10 · condition=api · locale=tw · 上次跑批 2026-08-31 03:22:10
 | `read_runs.py` | ✅ 可用 | `runs` ＋ gzip 原始檔 → 把原文印出來給人讀（只讀不寫） |
 | `backup.py` | ✅ 可用 | `data/` → 一個 `.tar.gz` 備份檔（含驗證功能） |
 | `parse.py` | 🔧 空殼（階段 2） | 原文 → 便宜模型逐則判讀 → `mentions`／`citations`／`domains` |
+| `audit.py` | ✅ 可用 | 自家網址 → 十項規則檢查 → `page_audits`（不呼叫 AI、不花錢） |
+| `eval/label.py` | ✅ 可用 | 原文 → **遮蔽品牌名**後請人標 → `eval/labeled.csv`（標準答案） |
+| `eval/check_judge.py` | ✅ 可用 | 標準答案 ＋ `mentions` → 一致率報告（< 90% 回傳非 0） |
 | `aggregate.py` | ✅ 可用 | 判讀結果 → 算指標與信賴區間 → `metrics_weekly` |
 | `gaps.py` | ✅ 可用 | 指標 → 找缺席題目群、算機會分數 → `gaps` |
-| `suggest.py` | 🔧 空殼（階段 5） | GSC＋站內搜尋＋回答中的新概念 → `prompt_suggestions` |
+| `suggest.py` | 🟡 部分可用 | 回答中的新概念 ✅／GSC 手動 CSV ✅／站內搜尋 🔧 → `prompt_suggestions` |
 | `draft.py` | ✅ 可用 | 一個 gap ＋ 證據 → 標題／大綱／骨架 ＋ 規則檢查 → `drafts` |
 | `writing_rules.py` | ✅ 可用 | **共用模組**（不是腳本）：四條寫作規則的檢查函式，`draft.py` 與階段 6 的 `audit.py` 共用同一份 |
 
@@ -591,6 +594,65 @@ python scripts/init_db.py
 **畫面顯示「未計算」「未判讀」「未記錄」**
 → 那是刻意的，不是壞掉。算不出來的數字一律留空，不顯示 0 ——
 　 顯示「好感度 0%」或「第 0 名」會把「沒資料」變成一個看起來很確定的假數字。
+
+---
+
+## 網站健檢（階段 6）
+
+回答「為什麼沒被引用」—— 可能不是內容不夠，是結構讓模型讀不到。
+
+```bash
+python scripts/audit.py --url https://www.fluv.com/tw/zh-tw/fluv-protection
+python scripts/audit.py --cited              # 檢查 AI 已經引用過的頁面（當對照組）
+python scripts/audit.py --history <網址>      # 改完之後看前後差異
+```
+
+**不呼叫任何 AI API、不花錢。** 唯一的網路行為是 GET 自家網址。
+十項檢查，每一項都附「所以我該改什麼」。
+
+---
+
+## 判讀器怎麼驗收（階段 2）
+
+這是整個專案唯一真正的品質關卡，順序**不可以顛倒**：
+
+```bash
+python eval/label.py              # 1. 人工盲測標記 100 則
+                                  # 2. 才寫 scripts/parse.py
+python eval/check_judge.py        # 3. 一致率 < 90% 不准往下走
+python eval/check_judge.py --errors   # 看判錯了什麼，附原文
+```
+
+### ⚠️ 標記的時候看不到品牌名，這是刻意的
+
+`label.py` 會把回答裡所有品牌名遮成代號（品牌 A、品牌 B…），
+而且**每一則重新洗牌** —— 同一個品牌在第 3 則是 A、第 7 則可能是 C。
+還原成真實品牌名是寫進 CSV 的那一刻才做的。
+
+因為標記的人如果知道哪個是客戶，標準答案本身就已經帶偏了 ——
+模糊的提及會標成正面、競品的好話會標成中性。
+後面拿這份答案去驗判讀器，等於用一把歪的尺量。
+
+---
+
+## 題目建議（階段 5）
+
+```bash
+python scripts/suggest.py --preview
+python scripts/suggest.py --gsc ~/Downloads/queries.csv   # 吃 GSC 匯出的 CSV
+```
+
+從三個來源找「題庫沒涵蓋但客戶在關心」的題目：
+
+| 來源 | 狀態 |
+|---|---|
+| AI 回答裡反覆出現的新概念 | ✅ 可用 |
+| Google Search Console 查詢字 | ✅ 手動匯出 CSV 可用；接 API 待做 |
+| 站內搜尋紀錄 | 🔧 需要 Fluv 後台提供 |
+
+⚠️ **它絕對不會自己寫進 `prompts` 表**，只寫 `prompt_suggestions`（`status='pending'`）。
+而且提議的句子一律標成「［待改寫］」—— 真正的訊號是「這個概念反覆出現」，
+不是那個機械組出來的句子。
 
 ---
 
