@@ -106,3 +106,72 @@ def raw_path(year, week, engine, prompt_id, locale, sample_index):
 def now_iso():
     """現在時間，格式 2026-08-24 03:12:00（整個專案統一用這個格式存時間）"""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ---------------------------------------------------------------------------
+# API 金鑰（階段 1 開始需要）
+# ---------------------------------------------------------------------------
+
+# .env 的位置。這個檔案已被 .gitignore 排除，不會進版控。
+ENV_PATH = os.path.join(ROOT_DIR, ".env")
+
+# 每個引擎需要哪一把金鑰
+ENGINE_KEY_NAMES = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "perplexity": "PERPLEXITY_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "google_aio": "SERPAPI_KEY",
+}
+
+
+def load_env():
+    """把 .env 讀進環境變數。
+
+    刻意不用 python-dotenv —— 需要的只是「一行一個 KEY=VALUE」，
+    自己寫十行就好，少一個套件少一件要維護的事。
+    已經存在的環境變數優先，不會被 .env 蓋掉。
+    """
+    if not os.path.exists(ENV_PATH):
+        return
+    with open(ENV_PATH, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            # 跳過空行與註解
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            # 已經在環境變數裡的優先（方便臨時覆寫）
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+def get_api_key(engine):
+    """取出某個引擎的 API 金鑰。沒有的話丟出人看得懂的錯誤。"""
+    load_env()
+    name = ENGINE_KEY_NAMES.get(engine)
+    if not name:
+        raise ValueError("不認識的引擎：%s" % engine)
+    key = os.environ.get(name, "").strip()
+    if not key:
+        raise RuntimeError(
+            "找不到 %s 的 API 金鑰。\n"
+            "請這樣做：\n"
+            "  1. cp .env.example .env\n"
+            "  2. 編輯 .env，把 %s= 後面填上金鑰\n"
+            "（.env 不會進版控，金鑰不會外流）" % (engine, name)
+        )
+    return key
+
+
+def iso_year_week(dt=None):
+    """回傳 (ISO 年, ISO 週)。原始檔案按年／週分資料夾用的。
+
+    用 ISO 週而不是「第幾個七天」，是因為 ISO 週全世界定義一致，
+    跨年的時候不會出現 W53 跟 W01 打架的狀況。
+    """
+    d = dt or datetime.now()
+    year, week, _ = d.isocalendar()
+    return year, week
