@@ -144,52 +144,28 @@ data/raw/{年}/W{週}/{引擎}/{prompt_id}_{locale}_{sample_index}.json.gz
 六步是一個閉環。第 6 步回到第 1 步，而「這次的數字跟上次比有沒有真的變化」就是
 整個系統存在的理由。
 
-### 資料怎麼接棒
+### 誰讀哪張表、誰寫哪張表
 
 每一支腳本只碰自己該碰的表。這是刻意的 —— 誰寫誰讀固定下來，
 出問題的時候才知道要查哪一支。
 
-```
-    人：題庫                      人：行動紀錄
-    prompts                      actions
-       │                             │
-       ▼                             │
-  ┌─────────────┐                    │
-  │ collect.py  │ 讀 prompts         │
-  │ 去問 AI     │ 寫 data/raw/ ＋ runs
-  └──────┬──────┘                    │
-         │ runs.raw_path 指向 gzip 原文
-         ▼                           │
-  ┌─────────────┐                    │
-  │ parse.py    │ 讀 runs ＋ 原文     │
-  │ 判讀        │ 寫 mentions / citations / domains
-  └──────┬──────┘                    │
-         │                           │
-         ▼                           │
-  ┌─────────────┐                    │
-  │aggregate.py │ 讀 runs ＋ mentions ＋ citations ＋ prompts
-  │ 算指標      │ 寫 metrics_weekly
-  └──────┬──────┘                    │
-         │                           │
-         ▼                           │
-  ┌─────────────┐                    │
-  │  gaps.py    │ 讀 metrics_weekly ＋ prompts ＋ mentions
-  │ 找缺口      │ 寫 gaps（status=open）
-  └──────┬──────┘                    │
-         │                           │
-         ▼                           │
-  ┌─────────────┐                    │
-  │  draft.py   │ 讀 gaps ＋ prompts ＋ 原文
-  │ 產骨架      │ 寫 drafts（status=draft）
-  └──────┬──────┘                    │
-         │                           │
-         ▼                           │
-      人審稿、發佈 ───────────────────┘
-         │
-         └─── 回到 collect.py，過幾週再量一次
+| 腳本 | 讀 | 寫 |
+|---|---|---|
+| `collect.py` | `prompts` | `data/raw/`、`runs` |
+| `parse.py` | `runs`、`data/raw/`（**唯讀**） | `mentions`、`citations`、`domains` |
+| `aggregate.py` | `runs`、`mentions`、`citations`、`domains`、`prompts` | `metrics_weekly` |
+| `gaps.py` | `metrics_weekly`、`prompts`、`mentions`、`runs` | `gaps` |
+| `draft.py` | `gaps`、`prompts`、`data/raw/`（**唯讀**） | `drafts` |
+| `suggest.py` | GSC、站內搜尋、`data/raw/`、`prompts` | `prompt_suggestions` |
+| `audit.py` | 自家網址清單、`gaps` | `page_audits` |
+| `read_runs.py` | `runs`、`data/raw/` | **什麼都不寫** |
+| `backup.py` | `data/` | `backups/*.tar.gz`（版控外） |
+| `app.py` | 全部的表 | 只有「設定」頁寫 `prompts`、`gaps.status`、`actions` |
 
-  app.py 讀全部的表，不寫任何東西（除了「設定」頁的題庫編輯）
-```
+人只手動維護三張表：`prompts`（題庫）、`actions`（行動紀錄），
+以及把 `gaps.status` 從 `open` 改成 `in_progress` / `done` / `holdout`。
+
+📊 視覺化的流程圖在 `README.md` 開頭（Mermaid，GitHub 會直接渲染）。
 
 ### 三個接棒的規矩
 
@@ -427,6 +403,9 @@ opportunity_score = (受影響題數 × 意圖權重 × 缺席程度) ÷ 補齊�
 ---
 
 ## Dashboard 八頁
+
+（**目前實作七頁。** 第八頁「網站健檢」屬於階段 6，還沒做 ——
+所以 `README.md` 寫「七頁畫面」是對的，不是筆誤。）
 
 | 頁 | 內容 |
 |---|---|
