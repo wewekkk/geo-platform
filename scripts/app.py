@@ -34,6 +34,7 @@ import html
 import io
 import json
 import os
+import subprocess
 import sys
 from datetime import date, datetime
 
@@ -45,7 +46,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (ACTION_CHANNELS, DEFAULT_DB_PATH, GAP_STATUSES, INTENTS,  # noqa: E402
                     INTENT_WEIGHTS, OUR_BRAND, ROOT_DIR, SOURCE_TYPES, connect,
                     now_iso)
-from aggregate import wilson_interval  # noqa: E402
+from aggregate import week_of, wilson_interval  # noqa: E402
 
 st.set_page_config(page_title="Fluv GEO 監測平台", page_icon="🐾", layout="wide")
 
@@ -286,7 +287,8 @@ def measurement_condition():
     """)
     if row.empty or not row.at[0, "n_runs"]:
         return None
-    cond = q("SELECT condition, locale FROM runs ORDER BY ts DESC LIMIT 1")
+    cond = q("SELECT condition, locale FROM runs r WHERE 1=1 %s "
+             "ORDER BY ts DESC LIMIT 1" % source_sql("r"))
     return {
         "n": int(row.at[0, "n_samples"]),
         "condition": cond.at[0, "condition"],
@@ -298,13 +300,116 @@ def measurement_condition():
     }
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# 資料來源篩選
+#
+# 資料庫裡同時有三種來源，混在一起看會得出錯的結論：
+#   demo   —— seed_demo.py 產生的亂數示範資料
+#   manual —— 人工在各家 AI 網頁介面問到的真實回答
+#   api    —— collect.py 自動抓的真實回答
+# ═══════════════════════════════════════════════════════════════════════
+
+# 刻意用「排除法」而不是「允許名單」：
+# 以後新增量測條件（例如不同的蒐集方式）會自動被當成真實資料，
+# 不會因為忘記加進名單而被無聲地濾掉。
+DEMO_CONDITIONS = ("demo",)
+
+SOURCE_CHOICES = {
+    "只看真實資料": ("EXCLUDE", DEMO_CONDITIONS),
+    "只看示範資料": ("ONLY", DEMO_CONDITIONS),
+    "全部（會混在一起）": None,
+}
+
+
+def source_conditions():
+    """目前選的資料來源。回傳 None 代表不篩選。"""
+    return SOURCE_CHOICES.get(st.session_state.get("data_source", "只看真實資料"))
+
+
+def source_sql(alias="r"):
+    """給 SQL 用的篩選片段，例如 " AND r.condition NOT IN ('demo')"。"""
+    choice = source_conditions()
+    if not choice:
+        return ""
+    mode, conds = choice
+    op = "NOT IN" if mode == "EXCLUDE" else "IN"
+    return " AND %s.condition %s (%s)" % (
+        alias, op, ",".join("'%s'" % c for c in conds))
+
+
+def source_label():
+    return st.session_state.get("data_source", "只看真實資料")
+
+
+def metrics_notice():
+    """給「數字來自 metrics_weekly」的頁面用的提醒。
+
+    兩件必須講清楚的事：
+      1. metrics_weekly 沒有 condition 欄位，它是 aggregate.py 的產出，
+         而 aggregate.py 一律排除示範資料。所以這一頁**永遠是真實資料**，
+         側邊欄的來源篩選對它無效 —— 不講的話使用者會以為篩選有生效。
+      2. 樣本數太少的時候，信賴區間會很寬。區間寬不是算錯，
+         是資料真的還不夠。這種時候不該拿數字做決定。
+    """
+    r = q("SELECT MAX(week) AS w, COUNT(DISTINCT week) AS weeks FROM metrics_weekly")
+    if r.empty or r.at[0, "w"] is None:
+        st.info("還沒有指標資料。資料進來之後執行 `python scripts/aggregate.py` 就會算出來。")
+        return
+
+    weeks = int(r.at[0, "weeks"])
+    # 側邊欄選了「示範資料」或「全部」的時候，這一頁的數字還是真實資料 ——
+    # 這件事不講清楚，使用者會以為篩選壞了（或更糟：以為看到的是示範資料）。
+    if (source_conditions() or (None,))[0] != "EXCLUDE":
+        st.info("ℹ️ **側邊欄的「資料來源」對這一頁無效，這一頁永遠是真實資料。**　"
+                "本頁數字讀的是 `metrics_weekly`，那是 `aggregate.py` 的產出，"
+                "而 `aggregate.py` 一律排除示範資料。\n\n"
+                "要看示範資料的話，去 **Prompt 監測**、**競品比較**、**來源分析** "
+                "那幾頁 —— 它們直接讀原始紀錄，篩選對它們有效。")
+    st.caption("本頁數字由 `aggregate.py` 從原始回答算出，**已排除示範資料**。"
+               "資料庫裡有 %d 個週次，最新是 %s。" % (weeks, r.at[0, "w"]))
+    if weeks < 2:
+        st.warning("⚠️ **目前只有一週的資料，所以沒有比較基準。**　"
+                   "畫面上所有「持平」都是跟自己比出來的，不是真的沒變化。"
+                   "至少要累積兩週才看得出趨勢。")
+    else:
+        # 跨週比較的前提是「問的是同一批題目」。題庫換過的話，
+        # 趨勢圖上的轉折來自題目難易度不同，不是品牌表現變了 ——
+        # 而且畫面上完全看不出來。所以一定要講出來。
+        # ⚠️ 週次一定要用 aggregate.py 的 week_of()（ISO 週）來算。
+        #    SQLite 的 strftime('%%W') 是另一種週定義，算出來會跟
+        #    metrics_weekly 裡的週次差一號 —— 那會讓警告指錯週次。
+        sets = q("""SELECT r.ts, r.prompt_id FROM runs r
+                    WHERE r.error IS NULL %s
+                    GROUP BY r.ts, r.prompt_id""" % source_sql("r"))
+        if not sets.empty:
+            sets = sets.copy()
+            sets["wk"] = sets["ts"].map(week_of)
+            by = sets.dropna(subset=["wk"]).groupby("wk")["prompt_id"].apply(set).sort_index()
+            bad = []
+            for a, b in zip(by.index, by.index[1:]):
+                sa, sb = by[a], by[b]
+                common = len(sa & sb)
+                if common < min(len(sa), len(sb)) * 0.8:
+                    bad.append((a, b, len(sa), len(sb), common))
+            if bad:
+                lines = "；".join(
+                    "%s（%d 題）→ %s（%d 題），共同題目 %d 題"
+                    % (a, na, b, nb, nc) for a, b, na, nb, nc in bad)
+                st.error("⛔ **題庫在週次之間換過，下面的趨勢圖不能當成變化來讀。**　"
+                         "%s。\n\n"
+                         "趨勢線的轉折來自「題目換了」而不是品牌表現變了。"
+                         "要比較的話，兩週必須問同一批題目。" % lines)
+
+
 def page_header(title, subtitle=None):
     """每一頁都從這裡開始：標題 ＋ 量測條件列 ＋ 右上角「示範資料」標記
 
     版面照 Fluv 後台：標題與副標在左，麵包屑在右。
     """
     import html as _html
-    st.markdown('<div class="demo-badge">示範資料</div>', unsafe_allow_html=True)
+    badge = {"只看真實資料": "真實資料", "只看示範資料": "示範資料"}.get(
+        source_label(), "真假混合")
+    st.markdown('<div class="demo-badge">%s</div>' % badge, unsafe_allow_html=True)
     st.markdown(
         '<div class="page-head"><div>'
         '<div class="ph-title">%s</div>%s'
@@ -367,7 +472,7 @@ def brand_stats(where_extra="", params=()):
         FROM mentions m
         JOIN runs r    ON r.id = m.run_id
         JOIN prompts p ON p.id = r.prompt_id
-        WHERE 1=1 """ + where_extra + """
+        WHERE 1=1 """ + where_extra + source_sql("r") + """
         GROUP BY m.entity, m.is_us
         ORDER BY mentions DESC
     """, params)
@@ -396,6 +501,7 @@ def week_index_of(day_str, weeks):
 
 def page_overview():
     page_header("總覽", "這一頁回答一個問題：這週我們在 AI 回答裡的表現，跟上週比有沒有真的變化？")
+    metrics_notice()
 
     t = overall_trend()
     if t.empty:
@@ -404,7 +510,36 @@ def page_overview():
         return
 
     weeks = t["week"].tolist()
-    cur, prev = t.iloc[-1], t.iloc[-2] if len(t) > 1 else t.iloc[-1]
+
+    # ---- 要看哪一週 ------------------------------------------------------
+    #
+    # 為什麼需要選：預設看「最新一週」，但最新那一週不一定是完整跑批 ——
+    # 可能是臨時只問了幾題，也可能是跑批失敗少跑了一半。
+    # 兩種情況下那一週的數字都不能代表現況，而畫面上看不出來。
+    n_by_week = {w: int(x) for w, x in zip(weeks, t["n_samples"])}
+    sel = st.selectbox(
+        "看哪一週", weeks[::-1], key="ov_week",
+        format_func=lambda w: "%s（%d 則樣本）" % (w, n_by_week[w])
+                              if w in n_by_week else str(w))
+    i = weeks.index(sel)
+    cur = t.iloc[i]
+    prev = t.iloc[i - 1] if i > 0 else cur
+    lw = sel
+
+    # CLAUDE.md 的三個「看到就要停下來」訊號之一：
+    # 某一週的樣本數比平常少很多 → 多半是有呼叫失敗但沒人發現，
+    # 或者那一週只是臨時抽查、不是完整跑批。
+    n_now = int(cur["n_samples"])
+    others = [int(x) for w, x in zip(weeks, t["n_samples"]) if w != sel]
+    if n_now < 30:
+        st.warning("⚠️ **%s 的樣本只有 %d 則，信賴區間會很寬。**　"
+                   "這種寬度下，數字上下晃動十幾個百分點都算正常 —— "
+                   "還不能拿來做決定。樣本數變 4 倍，區間寬度大約減半。" % (sel, n_now))
+    if others and n_now < max(others) * 0.5:
+        st.warning("⚠️ **%s 只有 %d 則樣本，其他週最多有 %d 則。**　"
+                   "這一週多半不是完整跑批（可能是臨時抽查，也可能是跑批失敗少跑了）。"
+                   "這種週次的數字不能代表現況 —— 上面的選單可以切到樣本多的那一週。"
+                   % (sel, n_now, max(others)))
 
     # ---- 四個 KPI --------------------------------------------------------
     st.subheader("本週關鍵指標")
@@ -426,47 +561,105 @@ def page_overview():
     # 引用率：AI 把我們的網域當成資料來源的回答佔比。
     # ⚠️ 這和能見度是兩件事 ——「被提到」是講出品牌名，「被引用」是附上我們的連結。
     #   內容行動（draft.py → actions）直接影響的是這個，所以評估成效要看它。
-    cite_cur = round(cur["citation_rate"] * n_cur)
-    cite_prev = round(prev["citation_rate"] * n_prev)
-    dc, diffc, whyc = compare_proportions(cite_cur, n_cur, cite_prev, n_prev)
-    kpi(c2, "引用率", "%.1f%%" % (cur["citation_rate"] * 100), dc,
-        "%+.1f pp" % (diffc * 100),
-        "AI 把我們的網域當成資料來源的回答佔比（不只是提到名字）。%d / %d 則。"
-        "\n\n95%% 信賴區間 %.1f%% ~ %.1f%%\n\n%s"
-        % (cite_cur, n_cur, cur["cite_ci_low"] * 100, cur["cite_ci_high"] * 100, whyc),
-        tint="purple", icon="🔗")
+    # ⚠️ 引用率可能是空的 —— 當那一週的資料沒有完整記錄引用來源時，
+    #    aggregate.py 會刻意留空而不是給一個分母錯誤的數字。
+    #    這裡要跟著留空，不可以當成 0%。
+    if pd.isna(cur["citation_rate"]):
+        kpi(c2, "引用率", "未計算", "持平", "—",
+            "這一週的引用來源沒有完整記錄，所以引用率算不出來。\n\n"
+            "硬算的話分母是錯的 —— 數字會看起來正常但意義是錯的。"
+            "等 `collect.py` 透過 API 跑起來，回應裡就會有完整的引用網址。",
+            tint="purple", icon="🔗")
+    else:
+        cite_cur = round(cur["citation_rate"] * n_cur)
+        if pd.isna(prev["citation_rate"]):
+            # 上一週算不出來 → 沒有比較基準，只能顯示本週的值
+            kpi(c2, "引用率", "%.1f%%" % (cur["citation_rate"] * 100), "持平", "—",
+                "AI 把我們的網域當成資料來源的回答佔比（不只是提到名字）。%d / %d 則。"
+                "\n\n95%% 信賴區間 %.1f%% ~ %.1f%%\n\n"
+                "上一週的引用來源沒有完整記錄，所以沒有比較基準。"
+                % (cite_cur, n_cur, cur["cite_ci_low"] * 100, cur["cite_ci_high"] * 100),
+                tint="purple", icon="🔗")
+        else:
+            cite_prev = round(prev["citation_rate"] * n_prev)
+            dc, diffc, whyc = compare_proportions(cite_cur, n_cur, cite_prev, n_prev)
+            kpi(c2, "引用率", "%.1f%%" % (cur["citation_rate"] * 100), dc,
+                "%+.1f pp" % (diffc * 100),
+                "AI 把我們的網域當成資料來源的回答佔比（不只是提到名字）。%d / %d 則。"
+                "\n\n95%% 信賴區間 %.1f%% ~ %.1f%%\n\n%s"
+                % (cite_cur, n_cur, cur["cite_ci_low"] * 100,
+                   cur["cite_ci_high"] * 100, whyc),
+                tint="purple", icon="🔗")
 
     # 好感度：在「有提到我們」的那些回答裡，口氣是正面的佔多少
-    pos_cur, pos_prev = round(cur["pos_pct"] * hits_cur), round(prev["pos_pct"] * hits_prev)
-    d2, diff2, why2 = compare_proportions(pos_cur, hits_cur, pos_prev, hits_prev)
-    kpi(c3, "好感度", "%.1f%%" % (cur["pos_pct"] * 100), d2,
-        "%+.1f pp" % (diff2 * 100),
-        "被提到時口氣是正面的比例。%d / %d 則提及。\n\n%s" % (pos_cur, hits_cur, why2),
-        tint="amber", icon="💬")
+    #
+    # ⚠️ 情緒可能完全沒判讀（人工匯入的資料刻意留空，因為 CLAUDE.md 規定
+    #    判讀器必須盲測）。沒判讀就老實顯示「未判讀」—— 絕對不可以當成 0%，
+    #    那會變成「好感度 0%」這種憑空編出來、而且看起來很嚴重的假數字。
+    if pd.isna(cur["pos_pct"]):
+        kpi(c3, "好感度", "未判讀", "持平", "—",
+            "情緒還沒判讀。判讀器（parse.py）是階段 2 的工作，"
+            "而且必須盲測 —— 判讀的人不能知道哪個品牌是客戶，"
+            "否則會不自覺地對自家放水。",
+            tint="amber", icon="💬")
+    else:
+        pos_cur = round(cur["pos_pct"] * hits_cur)
+        pos_prev = round((prev["pos_pct"] or 0) * hits_prev)
+        d2, diff2, why2 = compare_proportions(pos_cur, hits_cur, pos_prev, hits_prev)
+        kpi(c3, "好感度", "%.1f%%" % (cur["pos_pct"] * 100), d2,
+            "%+.1f pp" % (diff2 * 100),
+            "被提到時口氣是正面的比例。%d / %d 則提及。\n\n%s" % (pos_cur, hits_cur, why2),
+            tint="amber", icon="💬")
 
     # 風險提及：負面而且會直接影響信任的那些
     risk_n = int(q("""SELECT COUNT(*) AS n FROM mentions m JOIN runs r ON r.id=m.run_id
-                      WHERE m.is_us=1 AND m.risk_flag=1""").at[0, "n"])
-    neg_cur, neg_prev = round(cur["neg_pct"] * hits_cur), round(prev["neg_pct"] * hits_prev)
-    d3, diff3, why3 = compare_proportions(neg_cur, hits_cur, neg_prev, hits_prev)
-    # 風險是「越少越好」，所以方向要反過來標示
-    d3_disp = {"上升": "增加", "下降": "減少", "持平": "持平"}[d3]
-    kpi(c4, "風險提及", "%d 則" % risk_n, "持平" if d3 == "持平" else d3_disp,
-        "%+.1f pp" % (diff3 * 100),
-        "負面且屬於信任／急件類題目的提及（會直接影響成交）。\n\n"
-        "負面提及比例：%.1f%%\n\n%s" % (cur["neg_pct"] * 100, why3),
-        tint="coral", icon="⚠️")
+                      WHERE m.is_us=1 AND m.risk_flag=1 %s""" % source_sql("r")
+                   ).at[0, "n"])
+    if pd.isna(cur["neg_pct"]):
+        kpi(c4, "風險提及", "%d 則" % risk_n, "持平", "—",
+            "負面且屬於信任／急件類題目的提及（會直接影響成交）。\n\n"
+            "情緒還沒判讀，所以比例算不出來。這裡顯示的是 "
+            "`mentions.risk_flag` 已經被標記的筆數。",
+            tint="coral", icon="⚠️")
+    else:
+        neg_cur = round(cur["neg_pct"] * hits_cur)
+        neg_prev = round((prev["neg_pct"] or 0) * hits_prev)
+        d3, diff3, why3 = compare_proportions(neg_cur, hits_cur, neg_prev, hits_prev)
+        # 風險是「越少越好」，所以方向要反過來標示
+        d3_disp = {"上升": "增加", "下降": "減少", "持平": "持平"}[d3]
+        kpi(c4, "風險提及", "%d 則" % risk_n, "持平" if d3 == "持平" else d3_disp,
+            "%+.1f pp" % (diff3 * 100),
+            "負面且屬於信任／急件類題目的提及（會直接影響成交）。\n\n"
+            "負面提及比例：%.1f%%\n\n%s" % (cur["neg_pct"] * 100, why3),
+            tint="coral", icon="⚠️")
 
     # 平均排序：不是比例，沒有 Wilson 區間。
     # 用一個保守的門檻：差距小於 0.2 名就當作持平（樣本雜訊大約就是這個量級）。
-    pos_now = cur["avg_position"] or 0
-    pos_was = prev["avg_position"] or 0
-    dp = pos_now - pos_was
-    d4 = "持平" if abs(dp) < 0.2 else ("上升" if dp < 0 else "下降")  # 排序變小 = 變前面 = 好
-    kpi(c5, "平均排序", "第 %.2f 名" % pos_now, d4, "%+.2f 名" % dp,
-        "我們被提到時平均排在第幾個（越小越前面）。\n\n"
-        "這不是比例，沒有 Wilson 區間；改用保守門檻：差距小於 0.2 名就當作持平。",
-        tint="blue", icon="🏅")
+    # ⚠️ 不可以寫 `cur["avg_position"] or 0` —— NaN 在 Python 裡是 truthy，
+    #    or 0 擋不住，畫面就會出現「第 nan 名」。
+    #    而且平均排序算不出來的時候要老實說，不能顯示成「第 0 名」（那是最前面）。
+    pos_now = cur["avg_position"]
+    pos_was = prev["avg_position"]
+    if pd.isna(pos_now):
+        kpi(c5, "平均排序", "未記錄", "持平", "—",
+            "我們被提到時平均排在第幾個（越小越前面）。\n\n"
+            "這一週的資料沒有記錄排序 —— 九月那批是人工統計，"
+            "只記了「有沒有被提到」，沒有記第幾個。"
+            "等 `collect.py` 透過 API 跑起來，判讀器就會把排序記下來。",
+            tint="blue", icon="🏅")
+    else:
+        if pd.isna(pos_was):
+            d4, dp_txt = "持平", "—"
+        else:
+            dp = pos_now - pos_was
+            # 排序變小 = 變前面 = 好
+            d4 = "持平" if abs(dp) < 0.2 else ("上升" if dp < 0 else "下降")
+            dp_txt = "%+.2f 名" % dp
+        kpi(c5, "平均排序", "第 %.2f 名" % pos_now, d4, dp_txt,
+            "我們被提到時平均排在第幾個（越小越前面）。\n\n"
+            "這不是比例，沒有 Wilson 區間；改用保守門檻：差距小於 0.2 名就當作持平。"
+            + ("\n\n上一週沒有記錄排序，所以沒有比較基準。" if pd.isna(pos_was) else ""),
+            tint="blue", icon="🏅")
 
     with st.expander("這些數字怎麼算出來的？（可以自己拿計算機驗算）"):
         st.markdown("""
@@ -550,24 +743,32 @@ def page_overview():
     with cA:
         st.subheader("口氣的正／中／負比例")
         st.caption("在有提到我們的回答裡，口氣的分布怎麼變。")
-        f2 = go.Figure()
-        for name, col, color in [("正面", "pos_pct", C_POS), ("中性", "neu_pct", C_NEU),
-                                 ("負面", "neg_pct", C_NEG)]:
-            # marker_line 是刻意的：堆疊區段之間要有 2px 的底色留白，
-            # 不然三個色塊直接相黏，邊界會糊掉。
-            f2.add_trace(go.Bar(x=weeks, y=(t[col] * 100).round(1), name=name,
-                                marker_color=color,
-                                marker_line=dict(color="#ffffff", width=2),
-                                hovertemplate=name + " %{y:.1f}%<extra></extra>"))
-        f2.update_layout(barmode="stack", height=330, margin=dict(t=20, b=10, l=10, r=10),
-                         bargap=0.28,
-                         yaxis=dict(title="佔比 (%)"), legend=dict(orientation="h", y=1.12))
-        st.plotly_chart(f2)
+        if t[["pos_pct", "neu_pct", "neg_pct"]].isna().all().all():
+            # 情緒全部是空值 —— 畫出來會是一張空圖，看起來像「沒有負評」，
+            # 那是假的安心感。老實說明原因比畫一張空圖好。
+            st.info("情緒還沒判讀，所以畫不出比例趨勢。\n\n"
+                    "判讀器（`parse.py`）是階段 2 的工作，而且依照 CLAUDE.md "
+                    "必須先有 100 則人工盲測標記當標準答案才能寫 —— "
+                    "那是整個系統唯一真正的品質關卡。")
+        else:
+            f2 = go.Figure()
+            for name, col, color in [("正面", "pos_pct", C_POS), ("中性", "neu_pct", C_NEU),
+                                     ("負面", "neg_pct", C_NEG)]:
+                # marker_line 是刻意的：堆疊區段之間要有 2px 的底色留白，
+                # 不然三個色塊直接相黏，邊界會糊掉。
+                f2.add_trace(go.Bar(
+                    x=weeks, y=pd.to_numeric(t[col], errors="coerce").mul(100).round(1),
+                    name=name, marker_color=color,
+                    marker_line=dict(color="#ffffff", width=2),
+                    hovertemplate=name + " %{y:.1f}%<extra></extra>"))
+            f2.update_layout(barmode="stack", height=330, margin=dict(t=20, b=10, l=10, r=10),
+                             bargap=0.28,
+                             yaxis=dict(title="佔比 (%)"), legend=dict(orientation="h", y=1.12))
+            st.plotly_chart(f2)
 
     with cB:
         st.subheader("各引擎表現")
         st.caption("同一批題目，不同 AI 的答案差很多。誤差線是 95% 信賴區間。")
-        lw = latest_week()
         eng = q("""SELECT engine, visibility, ci_low, ci_high, n_samples
                    FROM metrics_weekly
                    WHERE week=? AND topic='all' AND intent='all' AND engine<>'all'
@@ -611,17 +812,23 @@ def page_overview():
     # ---- 重點洞察 --------------------------------------------------------
     st.subheader("重點洞察")
     st.caption("以下每一句都是從上面的資料自動整理出來的，不是人寫死的。")
-    insights = build_insights(t, weeks)
+    insights = build_insights(t, weeks, lw)
     for tone, text in insights:
         {"good": st.success, "bad": st.error, "flat": st.info}[tone](text)
 
     demo_footer()
 
 
-def build_insights(t, weeks):
-    """從資料自動整理出幾句人看得懂的結論"""
+def build_insights(t, weeks, week):
+    """從資料自動整理出幾句人看得懂的結論。
+
+    week 是使用者在畫面上選的那一週，不是永遠用最新的 ——
+    最新那一週可能只是臨時抽查（樣本很少），拿它下結論會錯。
+    """
     out = []
-    cur, prev = t.iloc[-1], t.iloc[-2] if len(t) > 1 else t.iloc[-1]
+    i = weeks.index(week)
+    cur = t.iloc[i]
+    prev = t.iloc[i - 1] if i > 0 else cur
     n_cur, n_prev = int(cur["n_samples"]), int(prev["n_samples"])
     d, diff, _ = compare_proportions(round(cur["visibility"] * n_cur), n_cur,
                                      round(prev["visibility"] * n_prev), n_prev)
@@ -646,8 +853,8 @@ def build_insights(t, weeks):
                     % (weeks[0], weeks[-1], first["visibility"] * 100,
                        cur["visibility"] * 100, diff8 * 100)))
 
-    # 最弱的意圖
-    lw = latest_week()
+    # 最弱的意圖（看使用者選的那一週）
+    lw = week
     it = q("""SELECT intent, visibility, n_samples FROM metrics_weekly
               WHERE week=? AND engine='all' AND topic='all' AND intent<>'all'
               ORDER BY visibility ASC LIMIT 1""", (lw,))
@@ -693,6 +900,10 @@ def highlight(answer, snippets):
 
 def read_raw(rel_path):
     """讀出一則原始回答。原始檔案是唯讀的資產，這裡只讀不寫。"""
+    # 呼叫失敗的 run 沒有原始檔（raw_path 是空的）。
+    # 這不是錯誤，是正常狀態 —— 失敗的原因存在 runs.error。
+    if not rel_path:
+        return None, None
     full = os.path.join(ROOT_DIR, rel_path)
     if not os.path.exists(full):
         return None, "找不到原始檔案：%s" % rel_path
@@ -721,10 +932,23 @@ def page_prompts():
                AVG(CASE WHEN m.is_us=1 THEN m.position END) AS avg_position,
                SUM(CASE WHEN m.is_us=1 AND m.sentiment_label='negative' THEN 1 ELSE 0 END) AS neg
         FROM runs r LEFT JOIN mentions m ON m.run_id = r.id
+        WHERE 1=1 %s
         GROUP BY r.prompt_id
-    """)
-    df = prompts.merge(stats, left_on="id", right_on="prompt_id", how="left").fillna(
-        {"runs": 0, "hits": 0, "neg": 0})
+    """ % source_sql("r"))
+
+    # 有幾則「真的留下回答原文」。
+    # 人工統計那批（manual-tally）只記了有沒有被提到，沒有原文可讀 ——
+    # 不標出來的話，使用者點到那些題目會以為畫面壞了。
+    full = q("""
+        SELECT r.prompt_id, COUNT(*) AS n_full
+        FROM runs r
+        WHERE r.error IS NULL AND r.condition NOT IN ('manual-tally') %s
+        GROUP BY r.prompt_id
+    """ % source_sql("r"))
+    df = prompts.merge(stats, left_on="id", right_on="prompt_id", how="left")
+    df = df.merge(full[["prompt_id", "n_full"]], left_on="id", right_on="prompt_id",
+                  how="left", suffixes=("", "_f"))
+    df = df.fillna({"runs": 0, "hits": 0, "neg": 0, "n_full": 0})
 
     c1, c2, c3 = st.columns(3)
     topics = ["全部"] + sorted(prompts["topic"].dropna().unique().tolist())
@@ -757,7 +981,9 @@ def page_prompts():
 
     with left:
         st.subheader("題目清單")
-        st.caption("點一列，右邊會顯示那一題的完整原始回答。")
+        st.caption("點一列，右邊會顯示那一題的完整原始回答。"
+                   "**「原文」那一欄是 0 的題目讀不到內容** —— "
+                   "那批是人工統計的，只記了有沒有被提到。")
         # 欄位刻意只留最必要的四欄 —— 區間、平均排序等細節放在右邊的詳情區，
         # 表格塞太多欄會把「能見度」擠到看不見。
         show = pd.DataFrame({
@@ -767,6 +993,7 @@ def page_prompts():
             # ⚠️ ×100：Streamlit 的 format 是直接套在原始值上，不會自動換算成百分比
             "能見度": (view["能見度"] * 100).round(1),
             "樣本": view["runs"].astype(int),
+            "有原文": view["n_full"].astype(int),
         })
         sel = st.dataframe(
             show, hide_index=True, width="stretch", height=420,
@@ -777,6 +1004,11 @@ def page_prompts():
                 "題目": st.column_config.TextColumn("題目", width="medium"),
                 "主題": st.column_config.TextColumn("主題", width="small"),
                 "樣本": st.column_config.NumberColumn("樣本", width="small"),
+                "有原文": st.column_config.NumberColumn(
+                    "原文", width="small",
+                    help="有幾則留下了回答原文、可以讀。0 代表那一題只有人工統計的"
+                         "「有沒有被提到」，沒有原文 —— 等 collect.py 透過 API "
+                         "跑起來才會有。"),
                 "能見度": st.column_config.ProgressColumn(
                     "能見度", format="%.0f%%", min_value=0, max_value=100,
                     width="small"),
@@ -797,39 +1029,96 @@ def page_prompts():
                       "啟用中" if row["active"] else "已停用"))
 
         runs = q("""SELECT r.id, r.engine, r.model_version, r.sample_index, r.ts,
-                           r.raw_path, r.cost,
+                           r.raw_path, r.cost, r.error,
                            (SELECT COUNT(*) FROM mentions m
                             WHERE m.run_id=r.id AND m.is_us=1) AS has_us
-                    FROM runs r WHERE r.prompt_id=? ORDER BY r.engine, r.sample_index""",
+                    FROM runs r WHERE r.prompt_id=? %s
+                    ORDER BY r.engine, r.sample_index""" % source_sql("r"),
                  (int(pid),))
         if runs.empty:
-            st.info("這一題還沒有跑過。")
+            st.info("這一題在「%s」這個範圍內還沒有資料。" % source_label())
             demo_footer()
             return
 
         eng_list = sorted(runs["engine"].unique().tolist())
+
+        def engine_label(e):
+            """引擎選單上直接標出模型版本。
+
+            為什麼要標：模型一換版，數字就會跳。不標的話，
+            看到能見度掉了會以為是自己的內容出問題，
+            其實只是 OpenAI 或 Google 改版了。
+            同一家如果跨版本跑過，這裡會提示有幾個版本。
+            """
+            versions = sorted(set(
+                v for v in runs[runs["engine"] == e]["model_version"] if v))
+            if not versions:
+                return "%s（沒記模型版本）" % e
+            if len(versions) == 1:
+                return "%s · %s" % (e, versions[0])
+            return "%s · %d 個模型版本（數字不可直接比）" % (e, len(versions))
+
         e1, e2 = st.columns([1, 1])
-        engine = e1.selectbox("引擎", eng_list, key="pm_engine")
+        engine = e1.selectbox("引擎與模型", eng_list, key="pm_engine",
+                              format_func=engine_label)
         sub = runs[runs["engine"] == engine]
-        labels = ["第 %d 次%s" % (int(r["sample_index"]) + 1,
-                                "　✅ 有提到我們" if r["has_us"] else "　—")
+        labels = ["第 %d 次 · $%.4f%s"
+                  % (int(r["sample_index"]) + 1,
+                     r["cost"] if pd.notna(r["cost"]) else 0.0,
+                     "　✅ 有提到我們" if r["has_us"] else "　—")
                   for _, r in sub.iterrows()]
-        idx = e2.selectbox("第幾次提問", range(len(labels)),
+        idx = e2.selectbox("第幾次提問與花費", range(len(labels)),
                            format_func=lambda i: labels[i], key="pm_sample")
         run = sub.iloc[idx]
 
+        # 這一題到目前為止花了多少 —— 調 --samples 的時候需要這個數字才知道划不划算
+        st.caption("這一題累計跑了 %d 次、總花費 $%.4f；"
+                   "其中 %s 跑了 %d 次、$%.4f"
+                   % (len(runs), runs["cost"].fillna(0).sum(),
+                      engine, len(sub), sub["cost"].fillna(0).sum()))
+
         payload, err = read_raw(run["raw_path"])
-        if err:
-            st.error(err)
+        if run["error"]:
+            # 失敗的 run 沒有原文。這不是程式出錯，是那次呼叫 API 失敗了。
+            st.error("**這一次呼叫失敗了**\n\n%s" % run["error"])
+            st.caption("算指標時失敗的 run 會被排除在分母外，"
+                       "不會被當成「沒提到我們」而讓能見度憑空變低。")
+        elif err or payload is None:
+            st.error(err or "讀不到原始檔案。")
         else:
             mentions = q("SELECT * FROM mentions WHERE run_id=? ORDER BY position",
                          (int(run["id"]),))
-            st.markdown(
-                '<div class="answer-box">%s</div>'
-                % highlight(payload.get("answer", ""), mentions["snippet"].tolist()),
-                unsafe_allow_html=True)
+            # 兩種檔案格式的欄位名不一樣：
+            #   collect.py 寫的真實資料用 answer_text
+            #   seed_demo.py 寫的示範資料用 answer
+            # 只讀其中一種的話，另一種會顯示成空白 —— 而且不會報錯。
+            answer = payload.get("answer_text") or payload.get("answer") or ""
+            meta_early = payload.get("meta") or {}
+            if not answer:
+                # 畫一個空框會讓人以為程式壞了。老實說明為什麼沒有原文。
+                tally = payload.get("tally") or {}
+                st.info("**這一則沒有保留回答原文。**\n\n%s\n\n"
+                        "人工標記的結果：%s"
+                        % (meta_early.get("collection_method")
+                           or "這批資料只記錄了判讀結果，沒有存下 AI 的回答全文。",
+                           tally.get("毛小愛有無被提及", "（沒有紀錄）")))
+                for c in (meta_early.get("caveats") or [])[:3]:
+                    st.caption("· %s" % c)
+                st.caption("要能讀原文，得讓 `collect.py` 透過 API 去問 —— "
+                           "API 的回應會連完整回答與引用網址一起存進 `data/raw/`。")
+            else:
+                st.markdown(
+                    '<div class="answer-box">%s</div>'
+                    % highlight(answer, mentions["snippet"].tolist()),
+                    unsafe_allow_html=True)
+            if "_demo" in payload:
+                st.caption("⚠️ 這是 `seed_demo.py` 產生的示範資料，不是真的 AI 回答。")
+            meta = payload.get("meta") or {}
+            if meta.get("collection_method"):
+                st.caption("蒐集方式：%s" % meta["collection_method"])
             st.caption("模型 %s · 提問時間 %s · 花費 $%.4f · 檔案 `%s`"
-                       % (run["model_version"], run["ts"], run["cost"], run["raw_path"]))
+                       % (run["model_version"], run["ts"], run["cost"] or 0,
+                          run["raw_path"]))
 
             st.markdown("**判讀結果**（黃色標記就是判定依據的那一句）")
             if mentions.empty:
@@ -838,9 +1127,12 @@ def page_prompts():
                 m = mentions.copy()
                 m["品牌"] = m.apply(
                     lambda r: ("🔵 " if r["is_us"] else "⚪ ") + r["entity"], axis=1)
+                # 情緒可能是空的 —— 人工蒐集的資料刻意不判情緒，
+                # 因為 CLAUDE.md 規定判讀器必須盲測，知道誰是客戶的人標了一定偏。
+                # 空值要老實顯示「未判讀」，不可以當成中性，那等於偷偷編了一個數字。
                 m["口氣"] = m.apply(
                     lambda r: {"positive": "🙂 正面", "neutral": "😐 中性",
-                               "negative": "🙁 負面"}[r["sentiment_label"]]
+                               "negative": "🙁 負面"}.get(r["sentiment_label"], "－ 未判讀")
                     + ("　⚠️ 風險" if r["risk_flag"] else ""), axis=1)
                 st.dataframe(
                     m[["position", "品牌", "口氣", "sentiment_score"]].rename(
@@ -871,12 +1163,13 @@ def page_topics():
         SELECT p.topic, m.entity, m.is_us,
                COUNT(DISTINCT m.run_id) AS hits,
                (SELECT COUNT(*) FROM runs r2 JOIN prompts p2 ON p2.id=r2.prompt_id
-                WHERE p2.topic = p.topic) AS total
+                WHERE p2.topic = p.topic %s) AS total
         FROM mentions m
         JOIN runs r    ON r.id = m.run_id
         JOIN prompts p ON p.id = r.prompt_id
+        WHERE 1=1 %s
         GROUP BY p.topic, m.entity
-    """)
+    """ % (source_sql("r2"), source_sql("r")))
     if matrix.empty:
         st.info("還沒有判讀資料。")
         demo_footer()
@@ -1000,10 +1293,13 @@ def page_competitors():
         "95% 區間": b["區間"],
         "SoV": (b["SoV"] * 100).round(1),
         "提及次數": b["mentions"].astype(int),
-        "平均排序": b["avg_position"].round(2),
-        "情緒均分": b["sentiment_avg"].round(3),
-        "正面比例": (b["正面比例"] * 100).round(1),
-        "負面比例": (b["負面比例"] * 100).round(1),
+        "平均排序": pd.to_numeric(b["avg_position"], errors="coerce").round(2),
+        # 情緒相關的三欄在「還沒判讀情緒」時會整欄是空值。
+        # to_numeric 把空值轉成 NaN（表格會顯示成空白），
+        # 直接相乘的話 pandas 會因為欄位是 object 型別而報錯。
+        "情緒均分": pd.to_numeric(b["sentiment_avg"], errors="coerce").round(3),
+        "正面比例": pd.to_numeric(b["正面比例"], errors="coerce").mul(100).round(1),
+        "負面比例": pd.to_numeric(b["負面比例"], errors="coerce").mul(100).round(1),
         "風險提及": b["risks"].astype(int),
     }).sort_values("SoV", ascending=False)
     st.dataframe(table, hide_index=True, width="stretch", column_config={
@@ -1024,10 +1320,12 @@ def page_competitors():
     src = q("""
         SELECT c.domain, c.source_type, COUNT(*) AS 次數
         FROM citations c
-        WHERE c.run_id IN (SELECT run_id FROM mentions WHERE entity = ?)
+        WHERE c.run_id IN (SELECT m.run_id FROM mentions m
+                           JOIN runs r ON r.id = m.run_id
+                           WHERE m.entity = ? %s)
         GROUP BY c.domain, c.source_type
         ORDER BY 次數 DESC
-    """, (ent,))
+    """ % source_sql("r"), (ent,))
     if src.empty:
         st.info("提到「%s」的回答裡，目前還沒有任何引用來源被記錄下來。" % ent)
     else:
@@ -1046,7 +1344,8 @@ def page_sources():
                 "AI 的答案是從別人的內容拼出來的。這一頁看它到底引用了誰，"
                 "以及哪些來源「引用了競品但沒引用我們」。")
 
-    cits = q("SELECT * FROM citations")
+    cits = q("SELECT c.* FROM citations c JOIN runs r ON r.id = c.run_id "
+             "WHERE 1=1 %s" % source_sql("r"))
     if cits.empty:
         st.info("還沒有引用資料。")
         demo_footer()
@@ -1062,8 +1361,10 @@ def page_sources():
                         WHERE m.run_id=c.run_id AND m.is_us=1) THEN 1 ELSE 0 END) AS 提到我們,
                SUM(CASE WHEN EXISTS (SELECT 1 FROM mentions m
                         WHERE m.run_id=c.run_id AND m.is_us=0) THEN 1 ELSE 0 END) AS 提到競品
-        FROM citations c GROUP BY c.domain ORDER BY 引用次數 DESC
-    """)
+        FROM citations c JOIN runs r ON r.id = c.run_id
+        WHERE 1=1 %s
+        GROUP BY c.domain ORDER BY 引用次數 DESC
+    """ % source_sql("r"))
     meta = q("SELECT domain, source_type, is_ours, first_seen, notes FROM domains")
     dom = dom.merge(meta, on="domain", how="left")
     dom["source_type"] = dom["source_type"].fillna("未分類")
@@ -1477,10 +1778,160 @@ def import_csv(df):
     return ok, errors
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# 跑批按鈕
+#
+# 為什麼要有這個：跑批本來只能在終端機下指令。做成按鈕之後，
+# 不用開終端機、不用記參數，按一下就好。
+#
+# 三道安全措施（因為這顆按鈕會花錢）：
+#   1. 按之前一定先看到預估花費
+#   2. 要勾「我知道這會花錢」才會亮起來
+#   3. 同一時間只准跑一個（用鎖檔擋，避免兩個分頁同時按下去花兩次錢）
+# ═══════════════════════════════════════════════════════════════════════
+
+# 鎖檔位置。data/ 不進版控，放這裡剛好。
+LOCK_PATH = os.path.join(ROOT_DIR, "data", ".collect.lock")
+
+
+def _collect_cmd(engines, extra=None):
+    """組出要執行的 collect.py 指令。
+
+    用 sys.executable 而不是寫死 "python"，
+    確保用的是跑這個儀表板的同一個 Python（虛擬環境才不會跑錯）。
+    -u 是不要緩衝輸出，這樣畫面上才看得到即時進度。
+    """
+    cmd = [sys.executable, "-u", os.path.join(ROOT_DIR, "scripts", "collect.py")]
+    for e in engines:
+        cmd += ["--engine", e]
+    return cmd + (extra or [])
+
+
+def _run_and_stream(cmd, max_lines=400):
+    """執行指令，把輸出即時印在畫面上。回傳 (結束代碼, 全部輸出)。"""
+    lines = []
+    box = st.empty()
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, bufsize=1, cwd=ROOT_DIR)
+    for line in proc.stdout:
+        line = line.rstrip()
+        # 濾掉 Python 的版本警告，那些跟跑批無關，只會洗版
+        if "Warning" in line or "warnings.warn" in line or line.startswith("  warnings"):
+            continue
+        lines.append(line)
+        box.code("\n".join(lines[-max_lines:]), language=None)
+    proc.wait()
+    return proc.returncode, "\n".join(lines)
+
+
+def run_batch_tab():
+    """設定頁的「跑一輪」分頁。"""
+    import collect as collect_mod
+    from common import ENGINE_KEY_NAMES, load_env
+
+    st.subheader("跑一輪")
+    st.caption("跑一輪 = 每一題、每一個選到的引擎，各問一次。"
+               "編號會自動接續，舊的原始回答永遠不會被蓋掉。")
+
+    load_env()
+    n_prompts = int(q("SELECT COUNT(*) AS n FROM prompts WHERE active=1 AND locale='tw'")
+                    .at[0, "n"])
+    if n_prompts == 0:
+        st.warning("題庫裡沒有啟用中的題目，沒有東西可以問。請先到「題庫管理」新增。")
+        return
+
+    # ---- 哪幾家可以跑（有金鑰的才給選）----
+    ready, missing = [], []
+    for e in collect_mod.ENGINES:
+        key = os.environ.get(ENGINE_KEY_NAMES.get(e, ""), "").strip()
+        (ready if key else missing).append(e)
+
+    if missing:
+        st.info("還沒有金鑰、所以不能選的引擎：**%s**　"
+                "（要啟用的話，把金鑰填進專案根目錄的 `.env`）" % "、".join(missing))
+    if not ready:
+        st.error("`.env` 裡一把金鑰都沒有，沒辦法跑。請先填入至少一家的 API 金鑰。")
+        return
+
+    default = [e for e in collect_mod.DEFAULT_ENGINES if e in ready] or ready[:1]
+    engines = st.multiselect("要問哪幾家", ready, default=default, key="rb_engines",
+                             format_func=lambda e: "%s（%s）" % (e, collect_mod.MODELS[e]))
+    if not engines:
+        st.warning("至少要選一家。")
+        return
+
+    st.caption("這一輪會呼叫 **%d 題 × %d 家 = %d 次** API。"
+               % (n_prompts, len(engines), n_prompts * len(engines)))
+
+    max_cost = st.number_input(
+        "花費上限（美金）", min_value=0.5, max_value=500.0, value=30.0, step=5.0,
+        key="rb_maxcost",
+        help="兩道煞車：開跑前預估超過就完全不跑；跑到一半累計達到上限也會停。"
+             "已經跑完的都會保留，再按一次可以接著跑。")
+
+    # ---- 先看預估花費 ----
+    st.divider()
+    if st.button("① 先試算花費（不會呼叫 API、不花錢）", key="rb_dry"):
+        code, out = _run_and_stream(
+            _collect_cmd(engines, ["--dry-run", "--max-cost", str(max_cost)]))
+        st.session_state["rb_saw_estimate"] = True
+
+    # ---- 真的跑 ----
+    st.divider()
+    locked = os.path.exists(LOCK_PATH)
+    if locked:
+        st.warning("偵測到已經有一輪正在跑（或上次跑到一半沒有正常結束）。"
+                   "確定沒有在跑的話，按下面的按鈕解除。")
+        if st.button("解除鎖定", key="rb_unlock"):
+            try:
+                os.remove(LOCK_PATH)
+            except OSError:
+                pass
+            st.rerun()
+        return
+
+    agree = st.checkbox("我知道按下去會真的呼叫 API、會產生費用", key="rb_agree")
+    go = st.button("② 開始跑一輪", type="primary", disabled=not agree, key="rb_go")
+
+    if go:
+        # 上鎖，避免兩個分頁同時按下去花兩次錢
+        try:
+            with open(LOCK_PATH, "w", encoding="utf-8") as f:
+                f.write(now_iso())
+        except OSError as e:
+            st.error("建立鎖檔失敗：%s" % e)
+            return
+        try:
+            with st.spinner("跑批中…　過程中不要關掉這個分頁。"):
+                code, out = _run_and_stream(
+                    _collect_cmd(engines, ["--max-cost", str(max_cost)]))
+        finally:
+            try:
+                os.remove(LOCK_PATH)
+            except OSError:
+                pass
+
+        q.clear()   # 清掉查詢快取，畫面才會看到新資料
+        if code == 0:
+            st.success("跑完了。到「Prompt 監測」頁就可以讀新的原始回答。")
+        else:
+            st.error("跑批中途出錯（結束代碼 %s）。上面的訊息會說明原因。"
+                     "已經跑完的部分都有存起來，再按一次會接著跑，不會重複收費。" % code)
+
+        if "沒有做任何網路搜尋" in out or "疑似沒開" in out:
+            st.warning("⚠️ 有回答完全沒有做網路搜尋。"
+                       "那代表 AI 回的是它的記憶而不是查來的資料 —— "
+                       "數字會看起來正常但沒有意義。請先確認該家的搜尋工具有開。")
+        if "完全一模一樣" in out:
+            st.warning("⚠️ 有題目的多次回答完全相同。"
+                       "這會讓信賴區間假性變窄，統計失去意義。")
+
+
 def page_settings():
     page_header("設定", "題庫、題目建議、競品名單、採樣設定。這一頁是唯一會寫入資料的地方。")
 
-    t1, t2, t3, t4 = st.tabs(["📋 題庫管理", "💡 題目建議佇列", "🏢 競品名單", "⚙️ 採樣設定"])
+    t1, t2, t3, t4, t5 = st.tabs(["📋 題庫管理", "💡 題目建議佇列", "🏢 競品名單",
+                                  "⚙️ 採樣設定", "▶️ 跑一輪"])
 
     # ---- 題庫管理 --------------------------------------------------------
     with t1:
@@ -1615,7 +2066,9 @@ def page_settings():
                            COUNT(*) AS 提及次數,
                            COUNT(DISTINCT run_id) AS 出現回答數,
                            AVG(position) AS 平均排序
-                    FROM mentions GROUP BY entity, is_us ORDER BY 提及次數 DESC""")
+                    FROM mentions m JOIN runs r ON r.id = m.run_id
+                    WHERE 1=1 %s
+                    GROUP BY entity, is_us ORDER BY 提及次數 DESC""" % source_sql("r"))
         if comp.empty:
             st.info("還沒有判讀資料。")
         else:
@@ -1671,6 +2124,10 @@ python scripts/collect.py --samples 10 --locale tw --condition api
 **絕對不爬 AI 產品的網頁介面** —— 只用官方 API 與 SerpApi。
         """)
 
+    # ---- 跑一輪 ----------------------------------------------------------
+    with t5:
+        run_batch_tab()
+
     demo_footer()
 
 
@@ -1700,13 +2157,28 @@ def main():
 
     choice = st.sidebar.radio("頁面", list(PAGES.keys()), label_visibility="collapsed")
     st.sidebar.divider()
-    st.sidebar.warning("**目前顯示的是示範資料**\n\n"
-                       "由 `scripts/seed_demo.py` 產生，用來展示功能與版面，"
-                       "不是真實的品牌表現。")
-    st.sidebar.caption("階段 0：骨架\n\n"
-                       "十張表已建好、七支腳本有可執行的空殼、七頁畫面已排版。\n\n"
-                       "階段 1 會接上 OpenAI／Anthropic／Perplexity 的官方 API，"
-                       "屆時這裡的數字就會換成真的。")
+
+    # 資料來源篩選。預設只看真實資料 —— 把假資料當預設太危險了。
+    st.sidebar.radio("資料來源", list(SOURCE_CHOICES.keys()),
+                     key="data_source", index=0)
+
+    counts = q("SELECT condition, COUNT(*) n FROM runs GROUP BY condition")
+    n_real = int(counts[counts["condition"].isin(["manual", "api"])]["n"].sum()) \
+        if not counts.empty else 0
+    n_demo = int(counts[counts["condition"] == "demo"]["n"].sum()) \
+        if not counts.empty else 0
+    st.sidebar.caption("資料庫裡有 **%d 則真實回答**、%d 則示範資料。" % (n_real, n_demo))
+
+    if (source_conditions() or (None,))[0] == "EXCLUDE":
+        st.sidebar.info("**真實資料模式**\n\n"
+                        "這個篩選影響的是直接讀 `runs`／`mentions`／`citations` 的頁面。\n\n"
+                        "**總覽**頁讀的是 `metrics_weekly`，那是 `aggregate.py` 的產出，"
+                        "它一律排除示範資料，所以永遠是真的。\n\n"
+                        "資料變動後記得重跑：`python scripts/aggregate.py`")
+    else:
+        st.sidebar.warning("**含示範資料**\n\n"
+                           "由 `scripts/seed_demo.py` 產生的亂數，"
+                           "用來展示功能與版面，不是真實的品牌表現。")
 
     PAGES[choice]()
 
