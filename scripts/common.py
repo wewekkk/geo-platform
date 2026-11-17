@@ -24,7 +24,12 @@ from datetime import datetime
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # 資料庫預設位置。data/ 已被 .gitignore 排除，不會進版控。
-DEFAULT_DB_PATH = os.path.join(ROOT_DIR, "data", "geo.db")
+# 可以用環境變數 GEO_DB 指定別的資料庫，方便並存多個版本：
+#   GEO_DB=data/geo-empty.db streamlit run scripts/app.py
+# 每支腳本的 --db 參數也還在，優先權比環境變數高。
+DEFAULT_DB_PATH = os.environ.get("GEO_DB") or os.path.join(ROOT_DIR, "data", "geo.db")
+if not os.path.isabs(DEFAULT_DB_PATH):
+    DEFAULT_DB_PATH = os.path.join(ROOT_DIR, DEFAULT_DB_PATH)
 
 # 原始回答存放的根目錄（永不修改、永不刪除）
 RAW_DIR = os.path.join(ROOT_DIR, "data", "raw")

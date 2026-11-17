@@ -432,11 +432,31 @@ def page_header(title, subtitle=None):
 
 
 def demo_footer():
-    """每頁底部再標一次資料來源，避免有人把假數字當真"""
+    """每頁底部再標一次資料來源。
+
+    ⚠️ 不可以寫死「本頁數字都是示範資料」—— 階段 0 那樣寫是對的，
+    但現在資料庫裡同時有真實資料與示範資料，寫死會變成一句錯的話。
+    依側邊欄選的來源 ＋ 資料庫實際內容決定要講什麼。
+    """
     st.divider()
-    st.caption("⚠️ 本頁所有數字皆為 **示範資料**，由 `scripts/seed_demo.py` 產生，"
-               "目的是展示功能與版面，不代表真實的品牌表現。"
-               "接上真實 API 之後（階段 1）會換成實際資料。")
+    counts = q("SELECT condition, COUNT(*) n FROM runs GROUP BY condition")
+    if counts.empty:
+        st.caption("資料庫裡還沒有任何跑批紀錄。")
+        return
+    n_demo = int(counts[counts["condition"].isin(DEMO_CONDITIONS)]["n"].sum())
+    n_real = int(counts["n"].sum()) - n_demo
+    mode = (source_conditions() or (None,))[0]
+
+    if mode == "EXCLUDE":
+        st.caption("本頁顯示的是 **真實資料**（%d 則），已排除 %d 則示範資料。"
+                   "側邊欄可以切換資料來源。" % (n_real, n_demo))
+    elif mode == "ONLY":
+        st.caption("⚠️ 本頁顯示的是 **示範資料**（%d 則），由 `scripts/seed_demo.py` "
+                   "用亂數產生，不代表真實的品牌表現。" % n_demo)
+    else:
+        st.caption("⚠️ 本頁把 **真實資料（%d 則）與示範資料（%d 則）混在一起**。"
+                   "示範資料是亂數，拿來做決定會出錯 —— "
+                   "側邊欄切成「只看真實資料」比較安全。" % (n_real, n_demo))
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1825,13 +1845,14 @@ def _run_and_stream(cmd, max_lines=400):
 
 
 def run_batch_tab():
-    """設定頁的「跑一輪」分頁。"""
+    """「跑一輪」的實際內容。"""
     import collect as collect_mod
     from common import ENGINE_KEY_NAMES, load_env
 
-    st.subheader("跑一輪")
     st.caption("跑一輪 = 每一題、每一個選到的引擎，各問一次。"
-               "編號會自動接續，舊的原始回答永遠不會被蓋掉。")
+               "要累積幾次就跑幾次 —— 編號會自動接續，舊的原始回答永遠不會被蓋掉。")
+    st.caption("⚠️ 建議分不同天跑。同一天連跑好幾次的話，那幾次共享同一個時間點的"
+               "搜尋環境，信賴區間會假性變窄（看起來「很穩定」，其實是同一個瞬間量了很多遍）。")
 
     load_env()
     n_prompts = int(q("SELECT COUNT(*) AS n FROM prompts WHERE active=1 AND locale='tw'")
@@ -1930,8 +1951,8 @@ def run_batch_tab():
 def page_settings():
     page_header("設定", "題庫、題目建議、競品名單、採樣設定。這一頁是唯一會寫入資料的地方。")
 
-    t1, t2, t3, t4, t5 = st.tabs(["📋 題庫管理", "💡 題目建議佇列", "🏢 競品名單",
-                                  "⚙️ 採樣設定", "▶️ 跑一輪"])
+    t1, t2, t3, t4 = st.tabs(["📋 題庫管理", "💡 題目建議佇列", "🏢 競品名單",
+                              "⚙️ 採樣設定"])
 
     # ---- 題庫管理 --------------------------------------------------------
     with t1:
@@ -2124,11 +2145,18 @@ python scripts/collect.py --samples 10 --locale tw --condition api
 **絕對不爬 AI 產品的網頁介面** —— 只用官方 API 與 SerpApi。
         """)
 
-    # ---- 跑一輪 ----------------------------------------------------------
-    with t5:
-        run_batch_tab()
-
     demo_footer()
+
+
+def page_run_batch():
+    """「跑一輪」自成一頁。
+
+    它原本是「設定」底下的第五個分頁，但那裡埋得太深 ——
+    跑一輪是整個流程的第 1 步、是這個平台最主要的動作，
+    不該放在「設定」裡面（設定是調東西的地方，不是做事的地方）。
+    """
+    page_header("跑一輪", "去問各家 AI，把回答存下來。這是整個流程的第 1 步。")
+    run_batch_tab()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -2137,6 +2165,7 @@ python scripts/collect.py --samples 10 --locale tw --condition api
 
 PAGES = {
     "📊 總覽": page_overview,
+    "▶️ 跑一輪": page_run_batch,
     "🔍 Prompt 監測": page_prompts,
     "🎯 受眾主題": page_topics,
     "🏁 競品比較": page_competitors,
