@@ -337,7 +337,12 @@ def aggregate(db_path, only_week=None, include_demo=False, quiet=False):
     weeks = sorted(set(r["week"] for r in rows))
 
     if not quiet:
-        print("納入計算的回答：%d 則（已排除示範資料與呼叫失敗的）" % len(rows))
+        # 訊息要跟實際行為一致 —— 加了 --include-demo 還印「已排除示範資料」
+        # 就是一句假話，而且剛好出現在最該講實話的地方。
+        print("納入計算的回答：%d 則（%s）"
+              % (len(rows),
+                 "⚠️ 含示範資料，已排除呼叫失敗的" if include_demo
+                 else "已排除示範資料與呼叫失敗的"))
         print("涵蓋週次：%s" % "、".join(weeks))
         print("要寫入的格子數：%d（週 × 引擎 × 主題 × 意圖，每個維度都含 'all' 合計）"
               % len(cells))
