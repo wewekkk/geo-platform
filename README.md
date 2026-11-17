@@ -356,12 +356,37 @@ python scripts/gaps.py                     # 寫入 gaps 表
 
 ```bash
 python scripts/draft.py --list                # 有哪些缺口可以寫
-python scripts/draft.py --gap 7 --preview     # 看會產出什麼
-python scripts/draft.py --gap 7               # 寫進 drafts 表
+python scripts/draft.py --gap 7 --preview     # 看骨架長什麼樣（不花錢）
+python scripts/draft.py --gap 7 --write       # 叫 AI 寫成文章（約 NT$3~8）
+python scripts/draft.py --gap 7 --write --facts 我的數字.txt
 python scripts/draft.py --check 我的文章.md     # 拿四條規則檢查一篇現成文章
 ```
 
-### ⚠️ 這支腳本不會幫你寫出成稿
+### `--write` 會做三件事
+
+1. 把骨架 ＋ 已知事實交給 AI，寫成通順的文章
+2. 寫完**自己再跑一次四條規則檢查**
+3. **檢查有沒有編造數字** —— 把文章裡每個數字抓出來，
+   比對有沒有出現在給它的事實裡
+
+第 3 點比第 2 點重要。模型寫作最常見的錯誤不是寫得不好，是
+**「寫得很好但數字是編的」** —— 讀起來很順，審稿時不容易發現。
+
+### ⚠️ 事實要先有，AI 才能寫
+
+AI 只能用給它的事實，不准自己編。事實從兩個地方來：
+
+| 來源 | 可信度 |
+|---|---|
+| `--facts <檔案>` 你自己補的（官網條款上的數字） | 高，優先用 |
+| 自動從已存下來的 AI 回答裡撈的 | 較低 —— 那是 AI 說的，AI 也會講錯 |
+
+**兩種來源的數字發佈前都要跟官網核對一次。**
+
+一條事實都沒有的話它會拒絕寫 —— 那只會產出一篇沒有數字的漂亮文章，
+正好違反它要遵守的規則。
+
+### 不加 `--write` 的話
 
 它產出的是**標題 ＋ 大綱 ＋ 骨架 ＋ 要填哪些事實**，不是可以直接發佈的散文。
 
