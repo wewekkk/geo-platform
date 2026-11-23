@@ -197,11 +197,35 @@ class PageParser(HTMLParser):
 
 
 def fetch(url):
-    """抓一個網址。回傳 (狀態碼, 內容文字, 錯誤訊息)。"""
-    import requests
+    """抓一個網址。回傳 (狀態碼, 內容文字, 錯誤訊息)。
+
+    優先用 requests，沒裝就退回標準函式庫的 urllib ——
+    這支不呼叫任何 AI API，不該因為少裝一個套件就整個跑不起來。
+    """
     try:
-        r = requests.get(url, timeout=TIMEOUT, headers={"User-Agent": UA})
-        return r.status_code, r.text, None
+        import requests
+    except ImportError:
+        requests = None
+
+    if requests is not None:
+        try:
+            r = requests.get(url, timeout=TIMEOUT, headers={"User-Agent": UA})
+            return r.status_code, r.text, None
+        except Exception as e:
+            return None, None, "%s：%s" % (type(e).__name__, e)
+
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            raw = r.read()
+            charset = r.headers.get_content_charset() or "utf-8"
+            return r.status, raw.decode(charset, "replace"), None
+    except urllib.error.HTTPError as e:
+        # 404／403 也是結果，要讓檢查項自己判斷，不能當成抓取失敗
+        raw = e.read() if hasattr(e, "read") else b""
+        return e.code, raw.decode("utf-8", "replace"), None
     except Exception as e:
         return None, None, "%s：%s" % (type(e).__name__, e)
 
@@ -489,7 +513,10 @@ def cited_pages(conn, limit):
         "SELECT c.url, COUNT(*) n FROM citations c "
         "JOIN domains d ON d.domain = c.domain "
         "JOIN runs r ON r.id = c.run_id "
+        # 空網址檢查不了，也不該佔掉一個名額 ——
+        # 判讀器只認得來源名稱、抓不到實際連結時會留空（例如 AI 摘要的「來源：Fluv」）
         "WHERE d.is_ours = 1 AND r.condition != 'demo' "
+        "AND c.url IS NOT NULL AND TRIM(c.url) != '' "
         "GROUP BY c.url ORDER BY n DESC LIMIT ?", (limit,)).fetchall()
     return [(r["url"], r["n"]) for r in rows]
 

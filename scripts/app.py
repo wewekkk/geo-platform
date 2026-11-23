@@ -210,6 +210,20 @@ def write(sql, params=()):
 # 規則 B：信賴區間 → 持平判斷
 # ═══════════════════════════════════════════════════════════════════════
 
+def nz(v, default=0.0):
+    """把 None／NaN 換成預設值。
+
+    ⚠️ 不可以用 `v or 0` 代替 —— NaN 在 Python 裡是 truthy，
+       `float("nan") or 0` 會回傳 NaN，接著 round(NaN) 直接炸掉。
+       這個坑在「本週有判讀、上週沒判讀」的時候一定會踩到，
+       而那正是剛開始判讀時的常態。
+    """
+    try:
+        return default if v is None or pd.isna(v) else v
+    except (TypeError, ValueError):
+        return default
+
+
 def compare_proportions(succ_now, n_now, succ_prev, n_prev):
     """比較兩個比例，回傳 (方向, 變化幅度, 說明)
 
@@ -624,7 +638,7 @@ def page_overview():
             tint="amber", icon="💬")
     else:
         pos_cur = round(cur["pos_pct"] * hits_cur)
-        pos_prev = round((prev["pos_pct"] or 0) * hits_prev)
+        pos_prev = round(nz(prev["pos_pct"]) * hits_prev)
         d2, diff2, why2 = compare_proportions(pos_cur, hits_cur, pos_prev, hits_prev)
         kpi(c3, "好感度", "%.1f%%" % (cur["pos_pct"] * 100), d2,
             "%+.1f pp" % (diff2 * 100),
@@ -643,7 +657,7 @@ def page_overview():
             tint="coral", icon="⚠️")
     else:
         neg_cur = round(cur["neg_pct"] * hits_cur)
-        neg_prev = round((prev["neg_pct"] or 0) * hits_prev)
+        neg_prev = round(nz(prev["neg_pct"]) * hits_prev)
         d3, diff3, why3 = compare_proportions(neg_cur, hits_cur, neg_prev, hits_prev)
         # 風險是「越少越好」，所以方向要反過來標示
         d3_disp = {"上升": "增加", "下降": "減少", "持平": "持平"}[d3]
@@ -1628,11 +1642,39 @@ def page_gaps():
                     st.text(d["body"])
                     st.caption("草稿永遠不會自動發佈。人審過、實際發佈之後，"
                                "再到下面登記一筆行動。")
-        if st.button("✍️ 產生草稿", key="mk_draft", type="primary"):
-            st.info("草稿產生器（`draft.py`）排在階段 5。\n\n"
-                    "屆時這個按鈕會執行：\n\n"
-                    "```\npython scripts/draft.py --gap-id %d\n```\n\n"
-                    "產出一律是 `status=draft`，等人審核，**永遠不自動發佈**。" % gid)
+        st.caption("第 5 步。要不要寫、什麼時候寫，由你決定 —— "
+                   "所以它不在「跑一輪」那條龍裡面。")
+        d1, d2 = st.columns(2)
+
+        if d1.button("✍️ 產生骨架", key="mk_draft", width="stretch",
+                     help="不呼叫 AI、不花錢。產出大綱與段落骨架，"
+                          "並附上從已存的 AI 回答裡撈到的可用事實。"):
+            with st.spinner("產生中…"):
+                code, _ = _run_and_stream(_script_cmd("draft.py", ["--gap", str(gid)]))
+            q.clear()
+            if code == 0:
+                st.success("骨架產生完成，重新整理這一頁就會出現在上面的草稿清單裡。")
+            else:
+                st.error("產生失敗（結束代碼 %s）。上面的訊息會說明原因。" % code)
+
+        if d2.button("🤖 讓 AI 寫成文章", key="mk_draft_ai", type="primary",
+                     width="stretch",
+                     help="會呼叫 AI，一篇約 NT$3~8。只能用骨架裡列出的事實，"
+                          "寫完會逐一檢查有沒有編造數字。"):
+            with st.spinner("AI 撰寫中…　一篇大約一分鐘。"):
+                code, out = _run_and_stream(
+                    _script_cmd("draft.py", ["--gap", str(gid), "--write"]))
+            q.clear()
+            if code == 0:
+                st.success("寫完了，重新整理這一頁就會看到。")
+            else:
+                st.error("撰寫失敗（結束代碼 %s）。上面的訊息會說明原因。" % code)
+            if "沒有出處" in out or "編造" in out:
+                st.warning("⚠️ 檢查到文章裡有來源不明的數字。"
+                           "那是 AI 自己編的，發佈前一定要逐一核對。")
+
+        st.caption("⚠️ 產出一律是 `status=draft`，**永遠不自動發佈**。"
+                   "每一個數字都要跟官網條款核對過才能上線。")
 
     with cR:
         st.subheader("登記一筆行動")
@@ -1827,6 +1869,15 @@ def _collect_cmd(engines, extra=None):
     return cmd + (extra or [])
 
 
+def _script_cmd(script, extra=None):
+    """組出要執行的某一支腳本的指令。
+
+    跟 _collect_cmd 一樣用 sys.executable，確保跑的是同一個虛擬環境。
+    """
+    cmd = [sys.executable, "-u", os.path.join(ROOT_DIR, "scripts", script)]
+    return cmd + (extra or [])
+
+
 def _run_and_stream(cmd, max_lines=400):
     """執行指令，把輸出即時印在畫面上。回傳 (結束代碼, 全部輸出)。"""
     lines = []
@@ -1847,7 +1898,7 @@ def _run_and_stream(cmd, max_lines=400):
 def run_batch_tab():
     """「跑一輪」的實際內容。"""
     import collect as collect_mod
-    from common import ENGINE_KEY_NAMES, load_env
+    from common import ENGINE_KEY_NAMES, iso_year_week, load_env
 
     st.caption("跑一輪 = 每一題、每一個選到的引擎，各問一次。"
                "要累積幾次就跑幾次 —— 編號會自動接續，舊的原始回答永遠不會被蓋掉。")
@@ -1911,7 +1962,14 @@ def run_batch_tab():
             st.rerun()
         return
 
-    agree = st.checkbox("我知道按下去會真的呼叫 API、會產生費用", key="rb_agree")
+    st.markdown("**按下去會依序跑完這四步：**")
+    st.caption("1️⃣ 問 AI（collect）→ 2️⃣ 判讀每則回答（parse）→ "
+               "3️⃣ 算指標（aggregate）→ 4️⃣ 找缺口（gaps）")
+    st.caption("第 5 步「寫草稿」不在這裡 —— 那要由你看過缺口之後決定要不要寫，"
+               "所以放在「機會建議」頁，一個缺口一個按鈕。")
+
+    agree = st.checkbox("我知道按下去會真的呼叫 API、會產生費用"
+                        "（問 AI 和判讀都會花錢，判讀便宜很多）", key="rb_agree")
     go = st.button("② 開始跑一輪", type="primary", disabled=not agree, key="rb_go")
 
     if go:
@@ -1922,10 +1980,35 @@ def run_batch_tab():
         except OSError as e:
             st.error("建立鎖檔失敗：%s" % e)
             return
+
+        # 第 4 步要指定週次 —— gaps.py 預設挑「樣本最多的那一週」，
+        # 不指定的話會一直盤點舊資料，剛收完的這一批反而用不到。
+        year, wk = iso_year_week()
+        this_week = "%d-W%02d" % (year, wk)
+
+        steps = [
+            ("1/4　問 AI",   _collect_cmd(engines, ["--max-cost", str(max_cost)]),
+             "去各家 AI 問題庫裡的每一題，把原始回答存下來。"),
+            ("2/4　判讀",     _script_cmd("parse.py", ["--week", this_week]),
+             "逐則判讀提到哪些品牌、排第幾、口氣如何、引用了哪些來源。"),
+            ("3/4　算指標",   _script_cmd("aggregate.py", ["--week", this_week]),
+             "算這一週的能見度、引用率、聲量佔比與信賴區間。"),
+            ("4/4　找缺口",   _script_cmd("gaps.py", ["--week", this_week]),
+             "找出「我們缺席、競品在場」的題目，排出機會分數。"),
+        ]
+
+        code, out, failed_at = 0, "", None
         try:
-            with st.spinner("跑批中…　過程中不要關掉這個分頁。"):
-                code, out = _run_and_stream(
-                    _collect_cmd(engines, ["--max-cost", str(max_cost)]))
+            for name, cmd, desc in steps:
+                st.markdown("**步驟 %s**" % name)
+                st.caption(desc)
+                with st.spinner("執行中…　過程中不要關掉這個分頁。"):
+                    code, step_out = _run_and_stream(cmd)
+                out += "\n" + step_out
+                if code != 0:
+                    failed_at = name
+                    break
+                st.success("步驟 %s 完成" % name)
         finally:
             try:
                 os.remove(LOCK_PATH)
@@ -1933,11 +2016,15 @@ def run_batch_tab():
                 pass
 
         q.clear()   # 清掉查詢快取，畫面才會看到新資料
-        if code == 0:
-            st.success("跑完了。到「Prompt 監測」頁就可以讀新的原始回答。")
+        if failed_at is None:
+            st.success("四步都跑完了。接下來：到「總覽」看這一週的數字，"
+                       "到「機會建議」看找出哪些缺口、決定要不要寫草稿。")
         else:
-            st.error("跑批中途出錯（結束代碼 %s）。上面的訊息會說明原因。"
-                     "已經跑完的部分都有存起來，再按一次會接著跑，不會重複收費。" % code)
+            st.error("跑到「步驟 %s」出錯（結束代碼 %s），後面的步驟沒有執行。"
+                     "上面的訊息會說明原因。\n\n"
+                     "**前面已經完成的步驟不會白跑** —— 原始回答和判讀結果都存好了，"
+                     "修掉問題之後再按一次會接著跑，不會重複收費。"
+                     % (failed_at, code))
 
         if "沒有做任何網路搜尋" in out or "疑似沒開" in out:
             st.warning("⚠️ 有回答完全沒有做網路搜尋。"

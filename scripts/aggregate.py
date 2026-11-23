@@ -64,8 +64,12 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import DEFAULT_DB_PATH, connect  # noqa: E402
 
-# 不算進指標的量測條件。demo 是 seed_demo.py 產生的亂數示範資料。
-EXCLUDED_CONDITIONS = ("demo",)
+# 不算進指標的量測條件。
+#   demo            seed_demo.py 產生的亂數示範資料
+#   manual-loggedin 在已登入的 Fluv 公司帳號下問到的 —— 回答被個人化，
+#                   提及率會系統性偏高。那批資料可以拿來做人工標記
+#                   （標記只在乎文字說了什麼），但不能當指標的基準。
+EXCLUDED_CONDITIONS = ("demo", "manual-loggedin")
 
 # 「只有人工統計、沒有保留原文」的量測條件。
 #
@@ -169,7 +173,7 @@ def week_of(ts):
     return "%d-W%02d" % (year, wk)
 
 
-def load_runs(conn, include_demo=False, only_week=None):
+def load_runs(conn, include_demo=False, only_week=None, include_conditions=()):
     """撈出每一則回答的判讀結果，一列一則 run。
 
     這是整支腳本唯一碰資料庫的地方。刻意只跑一次查詢、
@@ -177,6 +181,11 @@ def load_runs(conn, include_demo=False, only_week=None):
     不用去猜 SQL 的 GROUP BY 做了什麼。
     """
     excluded = () if include_demo else EXCLUDED_CONDITIONS
+    # --include-condition：把某一個預設排除的 condition 放回來算。
+    # 用途是「單獨看某一批收集的結果」，例如登入狀態收的那批。
+    # 預設行為完全不變 —— 沒給這個參數就跟以前一樣。
+    if include_conditions:
+        excluded = tuple(c for c in excluded if c not in include_conditions)
     sql = """
         SELECT r.id, r.engine, r.ts, r.condition, r.prompt_id,
                p.topic, p.intent,
@@ -312,10 +321,12 @@ def build_cells(rows):
     return cells
 
 
-def aggregate(db_path, only_week=None, include_demo=False, quiet=False):
+def aggregate(db_path, only_week=None, include_demo=False, quiet=False,
+              include_conditions=()):
     """主要流程。"""
     conn = connect(db_path)
-    rows = load_runs(conn, include_demo=include_demo, only_week=only_week)
+    rows = load_runs(conn, include_demo=include_demo, only_week=only_week,
+                     include_conditions=include_conditions)
 
     if not rows:
         print("沒有可以算的資料。")
@@ -453,7 +464,7 @@ def _interval_width(conn, week):
     return r["ci_high"] - r["ci_low"]
 
 
-def verify(db_path, week, include_demo=False):
+def verify(db_path, week, include_demo=False, include_conditions=()):
     """把某一週的中間結果攤開，讓人可以拿計算機自己驗算。
 
     這是階段 3 的驗收條件：「使用者能人工驗算至少一個指標，
@@ -461,7 +472,8 @@ def verify(db_path, week, include_demo=False):
     算錯的話整條歸因鏈都是假的。
     """
     conn = connect(db_path)
-    rows = load_runs(conn, include_demo=include_demo, only_week=week)
+    rows = load_runs(conn, include_demo=include_demo, only_week=week,
+                     include_conditions=include_conditions)
     if not rows:
         print("%s 這一週沒有資料。" % week)
         return
@@ -538,6 +550,11 @@ def main():
                         help="不查資料庫，直接示範這組數字的信賴區間怎麼算（可人工驗算）")
     parser.add_argument("--verify", metavar="週次",
                         help="把某一週的中間結果攤開，給人工驗算（不會寫入任何東西）")
+    parser.add_argument("--include-condition", action="append", default=[],
+                        metavar="CONDITION",
+                        help="把某個預設被排除的 condition 放回來算，可重複。"
+                             "例如 --include-condition manual-loggedin。"
+                             "算出來的不是基準，只能單獨看那一批。")
     parser.add_argument("--include-demo", action="store_true",
                         help="連示範資料一起算。平常不要用 —— 那會讓趨勢圖有一半是亂數。")
     args = parser.parse_args()
@@ -547,7 +564,8 @@ def main():
         return
 
     if args.verify:
-        verify(args.db, args.verify, include_demo=args.include_demo)
+        verify(args.db, args.verify, include_demo=args.include_demo,
+               include_conditions=tuple(args.include_condition))
         return
 
     print("=== aggregate.py ===")
@@ -555,7 +573,13 @@ def main():
     if args.include_demo:
         print("⚠️ --include-demo：示範資料也會被算進去，算出來的數字一半是亂數。")
         print()
-    aggregate(args.db, args.week, include_demo=args.include_demo)
+    for c in args.include_condition:
+        print("⚠️ --include-condition %s：這個 condition 本來被排除是有原因的"
+              "（見 EXCLUDED_CONDITIONS 上面的說明），算出來的數字不能當基準。" % c)
+    if args.include_condition:
+        print()
+    aggregate(args.db, args.week, include_demo=args.include_demo,
+              include_conditions=tuple(args.include_condition))
 
 
 if __name__ == "__main__":

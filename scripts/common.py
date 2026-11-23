@@ -164,7 +164,7 @@ def get_api_key(engine):
         raise RuntimeError(
             "找不到 %s 的 API 金鑰。\n"
             "請這樣做：\n"
-            "  1. cp .env.example .env\n"
+            "  1. cp -n .env.example .env   （-n：已經有 .env 就不覆蓋）\n"
             "  2. 編輯 .env，把 %s= 後面填上金鑰\n"
             "（.env 不會進版控，金鑰不會外流）" % (engine, name)
         )
