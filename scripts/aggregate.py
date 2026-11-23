@@ -321,6 +321,33 @@ def build_cells(rows):
     return cells
 
 
+def unjudged_weeks(rows):
+    """找出「有回答、但完全沒有判讀資料」的週次。
+
+    為什麼要特別擋：這兩件事完全不同，但算出來都是 0 ——
+      A. 判讀過了，AI 真的沒提到我們        → 能見度 0%，這是真的
+      B. 還沒判讀                          → 應該是「未判讀」
+
+    不擋的話 B 會被寫成「能見度 0%、區間 0%~5%、67 則樣本」，
+    看起來是非常確定的全面潰敗；接著 gaps.py 吃了這個 0%，
+    會產出一整排「我們完全缺席」的假缺口並寫進資料庫。
+    （2026-11-23 真的發生過，7 個假缺口。）
+
+    判斷方式：這一週所有回答加起來，連「有幾個品牌被提到」都是 0，
+    而且也沒有任何引用 —— 判讀過的話至少會記到競品。
+
+    ⚠️ 極端邊界：如果某一週真的每一則都沒提到任何品牌、也沒有任何來源，
+       會被誤判成未判讀。正解是在 runs 加一個 judged_at 欄位，
+       由 parse.py 寫入；那是 schema 變更，還沒做。
+    """
+    by_week = {}
+    for r in rows:
+        w = by_week.setdefault(r["week"], {"n": 0, "signal": 0})
+        w["n"] += 1
+        w["signal"] += r["all_mentions"] + r["us_cited"]
+    return sorted(w for w, v in by_week.items() if v["n"] > 0 and v["signal"] == 0)
+
+
 def aggregate(db_path, only_week=None, include_demo=False, quiet=False,
               include_conditions=()):
     """主要流程。"""
@@ -343,6 +370,29 @@ def aggregate(db_path, only_week=None, include_demo=False, quiet=False,
                 print("（資料庫裡有 %d 筆示範資料被排除了。真的要算進去的話加 "
                       "--include-demo，但那會讓趨勢圖有一半是亂數。）" % n_demo)
         return
+
+    # 未判讀的週次不進指標 —— 寧可那一週沒有數字，也不要一個假的 0%
+    skipped = unjudged_weeks(rows)
+    if skipped:
+        per_week = {w: len([r for r in rows if r["week"] == w]) for w in skipped}
+        n_skipped = sum(per_week.values())
+        rows = [r for r in rows if r["week"] not in skipped]
+        if not quiet:
+            print("⛔ 以下週次有回答、但完全沒有判讀資料，已經排除在指標外：")
+            for w in skipped:
+                print("     %s —— %d 則" % (w, per_week[w]))
+            print()
+            print("   共 %d 則。這些回答還沒有經過 parse.py 判讀，"
+                  "所以「有沒有提到我們」是未知，不是 0。" % n_skipped)
+            print("   算成 0% 的話，gaps.py 會產出一整排「我們完全缺席」的假缺口。")
+            print()
+            print("   要讓這些週次有數字，先跑：python scripts/parse.py --week %s"
+                  % skipped[0])
+            print()
+        if not rows:
+            if not quiet:
+                print("排除之後沒有剩下任何可以算的資料。")
+            return
 
     cells = build_cells(rows)
     weeks = sorted(set(r["week"] for r in rows))
