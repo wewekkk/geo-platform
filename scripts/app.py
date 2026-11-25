@@ -392,27 +392,44 @@ def metrics_notice():
         # ⚠️ 週次一定要用 aggregate.py 的 week_of()（ISO 週）來算。
         #    SQLite 的 strftime('%%W') 是另一種週定義，算出來會跟
         #    metrics_weekly 裡的週次差一號 —— 那會讓警告指錯週次。
-        sets = q("""SELECT r.ts, r.prompt_id FROM runs r
-                    WHERE r.error IS NULL %s
-                    GROUP BY r.ts, r.prompt_id""" % source_sql("r"))
-        if not sets.empty:
-            sets = sets.copy()
-            sets["wk"] = sets["ts"].map(week_of)
-            by = sets.dropna(subset=["wk"]).groupby("wk")["prompt_id"].apply(set).sort_index()
-            bad = []
-            for a, b in zip(by.index, by.index[1:]):
-                sa, sb = by[a], by[b]
-                common = len(sa & sb)
-                if common < min(len(sa), len(sb)) * 0.8:
-                    bad.append((a, b, len(sa), len(sb), common))
-            if bad:
-                lines = "；".join(
-                    "%s（%d 題）→ %s（%d 題），共同題目 %d 題"
-                    % (a, na, b, nb, nc) for a, b, na, nb, nc in bad)
-                st.error("⛔ **題庫在週次之間換過，下面的趨勢圖不能當成變化來讀。**　"
-                         "%s。\n\n"
-                         "趨勢線的轉折來自「題目換了」而不是品牌表現變了。"
-                         "要比較的話，兩週必須問同一批題目。" % lines)
+        bad = prompt_set_breaks()
+        if bad:
+            lines = "；".join(
+                "%s（%d 題）→ %s（%d 題），共同題目 %d 題"
+                % (a, na, b, nb, nc) for a, b, na, nb, nc in bad)
+            st.error("⛔ **題庫在週次之間換過，下面的趨勢圖不能當成變化來讀。**　"
+                     "%s。\n\n"
+                     "趨勢線的轉折來自「題目換了」而不是品牌表現變了。"
+                     "要比較的話，兩週必須問同一批題目。" % lines)
+
+
+def prompt_set_breaks():
+    """找出「題庫換過」的相鄰週次對。
+
+    回傳 [(前一週, 後一週, 前一週題數, 後一週題數, 共同題數), ...]
+
+    跨週比較的前提是「問的是同一批題目」。題庫換過的話，趨勢圖上的轉折
+    來自題目難易度不同，不是品牌表現變了 —— 而且畫面上完全看不出來。
+
+    ⚠️ 週次一定要用 aggregate.py 的 week_of()（ISO 週）來算。
+       SQLite 的 strftime('%%W') 是另一種週定義，算出來會跟
+       metrics_weekly 裡的週次差一號 —— 那會讓警告指錯週次。
+    """
+    sets = q("""SELECT r.ts, r.prompt_id FROM runs r
+                WHERE r.error IS NULL %s
+                GROUP BY r.ts, r.prompt_id""" % source_sql("r"))
+    if sets.empty:
+        return []
+    sets = sets.copy()
+    sets["wk"] = sets["ts"].map(week_of)
+    by = sets.dropna(subset=["wk"]).groupby("wk")["prompt_id"].apply(set).sort_index()
+    out = []
+    for a, b in zip(by.index, by.index[1:]):
+        sa, sb = by[a], by[b]
+        common = len(sa & sb)
+        if common < min(len(sa), len(sb)) * 0.8:
+            out.append((a, b, len(sa), len(sb), common))
+    return out
 
 
 def page_header(title, subtitle=None):
@@ -632,9 +649,10 @@ def page_overview():
     #    那會變成「好感度 0%」這種憑空編出來、而且看起來很嚴重的假數字。
     if pd.isna(cur["pos_pct"]):
         kpi(c3, "好感度", "未判讀", "持平", "—",
-            "情緒還沒判讀。判讀器（parse.py）是階段 2 的工作，"
-            "而且必須盲測 —— 判讀的人不能知道哪個品牌是客戶，"
-            "否則會不自覺地對自家放水。",
+            "情緒還沒判讀。判讀器（parse.py）已經寫好，但還沒跑過 —— "
+            "它需要 ANTHROPIC_API_KEY。\n\n"
+            "跑完之後還要用 eval/check_judge.py 跟 100 則人工盲測標記比對，"
+            "一致率 ≥ 90% 才算過關。在那之前判讀出來的情緒不能當正式指標。",
             tint="amber", icon="💬")
     else:
         pos_cur = round(cur["pos_pct"] * hits_cur)
@@ -781,8 +799,10 @@ def page_overview():
             # 情緒全部是空值 —— 畫出來會是一張空圖，看起來像「沒有負評」，
             # 那是假的安心感。老實說明原因比畫一張空圖好。
             st.info("情緒還沒判讀，所以畫不出比例趨勢。\n\n"
-                    "判讀器（`parse.py`）是階段 2 的工作，而且依照 CLAUDE.md "
-                    "必須先有 100 則人工盲測標記當標準答案才能寫 —— "
+                    "判讀器（`parse.py`）已經寫好，但還沒跑過 —— 它需要 "
+                    "`ANTHROPIC_API_KEY`。\n\n"
+                    "跑完之後還要依照 CLAUDE.md 用 100 則人工盲測標記驗收，"
+                    "一致率 ≥ 90% 才准當正式指標 —— "
                     "那是整個系統唯一真正的品質關卡。")
         else:
             f2 = go.Figure()
@@ -846,46 +866,67 @@ def page_overview():
     # ---- 重點洞察 --------------------------------------------------------
     st.subheader("重點洞察")
     st.caption("以下每一句都是從上面的資料自動整理出來的，不是人寫死的。")
-    insights = build_insights(t, weeks, lw)
+    insights = build_insights(t, weeks, lw, prompt_set_breaks())
     for tone, text in insights:
         {"good": st.success, "bad": st.error, "flat": st.info}[tone](text)
 
     demo_footer()
 
 
-def build_insights(t, weeks, week):
+def build_insights(t, weeks, week, breaks=()):
     """從資料自動整理出幾句人看得懂的結論。
 
     week 是使用者在畫面上選的那一週，不是永遠用最新的 ——
     最新那一週可能只是臨時抽查（樣本很少），拿它下結論會錯。
+
+    breaks 是 prompt_set_breaks() 的結果。題庫在這兩週之間換過的話，
+    這組比較根本無效 —— 不可以說「持平」。
+    「持平」的意思是「量到了，而且沒變」，跟「這兩個數字不能比」完全不同，
+    但兩句都長得像「沒事」，並排顯示會自相矛盾（畫面上真的發生過：
+    一邊說「持平，不需要處理」，一邊說「不能當成變化來讀」）。
     """
     out = []
     i = weeks.index(week)
     cur = t.iloc[i]
     prev = t.iloc[i - 1] if i > 0 else cur
     n_cur, n_prev = int(cur["n_samples"]), int(prev["n_samples"])
-    d, diff, _ = compare_proportions(round(cur["visibility"] * n_cur), n_cur,
-                                     round(prev["visibility"] * n_prev), n_prev)
-    if d == "持平":
-        out.append(("flat", "**整體能見度和上週持平**（%.1f%% → %.1f%%，"
-                            "差距落在信賴區間內，屬於隨機波動，不需要處理）。"
+
+    # 題庫換過的話，所有「跨週比較」的句子一律不產出 ——
+    # 只跳過比較，這一週自己的事實（最弱意圖、最弱引擎、待處理缺口）照樣要講。
+    broke = next((b for b in breaks if b[1] == week), None)
+    if broke:
+        # 完整說明已經印在趨勢圖上方了，這裡只補「所以這個數字不能解讀」，
+        # 不重複一遍題數 —— 同一頁講兩次同一件事會讓人以為是兩個問題。
+        out.append(("bad",
+                    "**%.1f%% → %.1f%% 這個變化不能解讀** —— 題庫在這兩週之間換過，"
+                    "原因見趨勢圖上方的說明。"
                     % (prev["visibility"] * 100, cur["visibility"] * 100)))
     else:
-        out.append(("good" if diff > 0 else "bad",
-                    "**整體能見度%s**：%.1f%% → %.1f%%，兩週的信賴區間沒有重疊，"
-                    "這是真的變化。" % (d, prev["visibility"] * 100, cur["visibility"] * 100)))
+        d, diff, _ = compare_proportions(round(cur["visibility"] * n_cur), n_cur,
+                                         round(prev["visibility"] * n_prev), n_prev)
+        if d == "持平":
+            out.append(("flat", "**整體能見度和上週持平**（%.1f%% → %.1f%%，"
+                                "差距落在信賴區間內，屬於隨機波動，不需要處理）。"
+                        % (prev["visibility"] * 100, cur["visibility"] * 100)))
+        else:
+            out.append(("good" if diff > 0 else "bad",
+                        "**整體能見度%s**：%.1f%% → %.1f%%，兩週的信賴區間沒有重疊，"
+                        "這是真的變化。"
+                        % (d, prev["visibility"] * 100, cur["visibility"] * 100)))
 
-    # 八週的頭尾比較（樣本累積起來，比單週比較有力）
-    first = t.iloc[0]
-    n_f = int(first["n_samples"])
-    d8, diff8, _ = compare_proportions(round(cur["visibility"] * n_cur), n_cur,
-                                       round(first["visibility"] * n_f), n_f)
-    if d8 != "持平":
-        out.append(("good" if diff8 > 0 else "bad",
-                    "**八週來看趨勢明確**：%s → %s，能見度從 %.1f%% 變成 %.1f%%"
-                    "（%+.1f 個百分點），這個幅度已經超出誤差範圍。"
-                    % (weeks[0], weeks[-1], first["visibility"] * 100,
-                       cur["visibility"] * 100, diff8 * 100)))
+        # 頭尾比較（樣本累積起來，比單週比較有力）。
+        # 中間只要有任何一次換過題庫，頭尾也不能比 —— 同樣跳過。
+        if not breaks:
+            first = t.iloc[0]
+            n_f = int(first["n_samples"])
+            d8, diff8, _ = compare_proportions(round(cur["visibility"] * n_cur), n_cur,
+                                               round(first["visibility"] * n_f), n_f)
+            if d8 != "持平":
+                out.append(("good" if diff8 > 0 else "bad",
+                            "**長期趨勢明確**：%s → %s，能見度從 %.1f%% 變成 %.1f%%"
+                            "（%+.1f 個百分點），這個幅度已經超出誤差範圍。"
+                            % (weeks[0], weeks[-1], first["visibility"] * 100,
+                               cur["visibility"] * 100, diff8 * 100)))
 
     # 最弱的意圖（看使用者選的那一週）
     lw = week
